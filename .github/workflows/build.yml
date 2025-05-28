@@ -13,28 +13,25 @@ jobs:
     strategy:
       matrix:
         os: [ windows-latest, macos-latest, ubuntu-latest ]
-        python-version: [ "3.11" ]  # Stick with Python 3.11
+        python-version: [ "3.11" ]
 
     steps:
     - name: Checkout code
-      uses: actions/checkout@v4  # Updated to v4, verify if v5 exists
+      uses: actions/checkout@v4
       with:
-        lfs: true  # Enable Git LFS to handle large .nc files if tracked
-        fetch-depth: 1  # Shallow clone for faster checkout
+        fetch-depth: 1
 
-    - name: Verify Git and LFS
-      run: |
-        git --version
-        git lfs version
+    - name: Verify Git
+      run: git --version
       shell: bash
 
     - name: Set up Python
-      uses: actions/setup-python@v5  # Use v5, check for v6
+      uses: actions/setup-python@v5
       with:
         python-version: ${{ matrix.python-version }}
 
     - name: Cache Python dependencies
-      uses: actions/cache@v4  # Use v4, check for v5
+      uses: actions/cache@v4
       with:
         path: ~/.cache/pip
         key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
@@ -57,7 +54,7 @@ jobs:
     - name: Install Python dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install pyinstaller==6.10.0  # Updated to latest stable version
+        pip install pyinstaller==6.10.0
         pip install fiona
         pip install -r requirements.txt
       shell: bash
@@ -69,19 +66,9 @@ jobs:
         PYTHONPATH: ./gridflow
       shell: bash
 
-    - name: Test executable
+    - name: Debug dist directory
       run: |
-        case "${{ matrix.os }}" in
-          windows-latest)
-            ./dist/gridflow-windows.exe --help
-            ;;
-          macos-latest)
-            ./dist/gridflow-macos --help
-            ;;
-          ubuntu-latest)
-            ./dist/gridflow-linux --help
-            ;;
-        esac
+        ls -la dist/
       shell: bash
 
     - name: Rename executable
@@ -99,8 +86,23 @@ jobs:
         esac
       shell: bash
 
+    - name: Test executable
+      run: |
+        case "${{ matrix.os }}" in
+          windows-latest)
+            ./dist/gridflow-windows.exe --help
+            ;;
+          macos-latest)
+            ./dist/gridflow-macos --help
+            ;;
+          ubuntu-latest)
+            ./dist/gridflow-linux --help
+            ;;
+        esac
+      shell: bash
+
     - name: Upload artifacts
-      uses: actions/upload-artifact@v4  # Use v4, check for v5
+      uses: actions/upload-artifact@v4
       with:
         name: gridflow-executables-${{ matrix.os }}
         path: |
@@ -108,7 +110,7 @@ jobs:
 
     - name: Attach to release
       if: startsWith(github.ref, 'refs/tags/')
-      uses: softprops/action-gh-release@v2  # Use v2, check for v3
+      uses: softprops/action-gh-release@v2
       with:
         files: |
           dist/gridflow-*

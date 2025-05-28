@@ -2,6 +2,7 @@
 import os
 import glob
 import fiona
+import pyproj
 from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs, collect_submodules
 
 block_cipher = None
@@ -34,17 +35,17 @@ hiddenimports = [
     'PyQt5.QtWidgets',
     'PyQt5.QtCore',
     'PyQt5.QtGui',
-    'PyQt5.sip',  # Required for PyQt5
-    'PyQt5.Qt',    # Ensure Qt enums are included
+    'PyQt5.sip',
+    'PyQt5.Qt',
     'requests',
     'netCDF4',
     'numpy',
-    'dateutil',  # Fixed: Changed from 'python_dateutil' to 'dateutil'
+    'dateutil',
     'shapely',
     'pyproj',
     'fiona',
-    'fiona._shim',  # Added to address missing fiona._shim
-    'jinja2',  # Added to address missing jinja2 (optional if not using styled DataFrames)
+    'fiona._shim',
+    'jinja2',
 ]
 hiddenimports += collect_submodules('fiona')
 hiddenimports += collect_submodules('geopandas', filter=lambda name: not name.startswith('geopandas.tests'))
@@ -56,8 +57,8 @@ hiddenimports += collect_submodules('PyQt5', filter=lambda name: not name.starts
 fiona_gdal_data = os.path.join(os.path.dirname(fiona.__file__), 'gdal_data')
 fiona_datas = [(os.path.join(fiona_gdal_data, f), 'fiona/gdal_data') for f in os.listdir(fiona_gdal_data) if os.path.isfile(os.path.join(fiona_gdal_data, f))]
 
-# Manually specify PROJ data path if not found automatically
-proj_data_dir = r"D:\MyLibrary\GridFlow-v1\gridflow\test-env\Library\share\proj"
+# Dynamically find PROJ data
+proj_data_dir = pyproj.datadir.get_data_dir()
 if os.path.exists(proj_data_dir):
     proj_datas = [(os.path.join(proj_data_dir, f), 'pyproj/proj') for f in os.listdir(proj_data_dir) if os.path.isfile(os.path.join(proj_data_dir, f))]
 else:
@@ -66,6 +67,8 @@ else:
 datas = [
     ('gridflow_logo.png', '.'),
     ('gridflow_logo.ico', '.'),
+    # Add PyQt5 plugins
+    *collect_data_files('PyQt5.Qt.plugins', include_py_files=True),
 ] + vocab_datas + shapefile_datas + fiona_datas + proj_datas
 datas += collect_data_files('pyproj')
 datas += collect_data_files('netCDF4')
@@ -75,6 +78,7 @@ binaries = (
     collect_dynamic_libs('shapely') +
     collect_dynamic_libs('netCDF4') +
     collect_dynamic_libs('geopandas') +
+    collect_dynamic_libs('fiona') +
     collect_dynamic_libs('PyQt5')
 )
 
@@ -93,7 +97,6 @@ a = Analysis(
         'tensorflow',
         'torch',
         'scipy',
-        # Exclude unused Qt modules to reduce warnings and bundle size
         'PyQt5.Qt3DCore',
         'PyQt5.Qt3DRender',
         'PyQt5.Qt3DExtras',
