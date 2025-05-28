@@ -15,14 +15,14 @@ from functools import partial
 from os.path import expanduser
 from typing import Optional, Dict, Callable, Any
 
-from PyQt5 import QtCore
+from PyQt5 import QtCore, QtGui
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QLabel, QVBoxLayout, QHBoxLayout,
     QFormLayout, QLineEdit, QPushButton, QComboBox, QCheckBox, QProgressBar,
     QFileDialog, QMessageBox, QAction, QTextEdit, QSizePolicy, QMenu,
     QScrollArea, QGraphicsOpacityEffect, QSplitter, QCompleter
 )
-from PyQt5.QtGui import QFont, QPixmap, QPalette, QColor
+from PyQt5.QtGui import QFont, QPixmap, QPalette, QColor, QFontMetrics
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QSettings, QTimer, QObject, QPropertyAnimation, QEasingCurve
 
 from gridflow.logging_utils import setup_logging
@@ -482,7 +482,8 @@ class GridFlowGUI(QMainWindow):
             3. Workers / verbosity row + buttons
             4. Progress-bar
             5. LOG PANE (in splitter)
-            6. Footer
+            6. Command display (visible in Advanced mode when task is running, above footer)
+            7. Footer
 
         The header, form, and controls live in a QScrollArea to prevent squashing.
         The form card has its own QScrollArea for independent scrolling of arguments.
@@ -494,17 +495,15 @@ class GridFlowGUI(QMainWindow):
         margin = 8 if small_screen else 12
         spacing = 5 if small_screen else 8
         # Scale logo height based on resolution (smaller overall)
-        base_logo_height = 80 if small_screen else 120  # Reduced base height
-        logo_height = int(base_logo_height * (scr.height() / 1080))  # Scale with screen height (1080 as reference)
+        base_logo_height = 80 if small_screen else 120
+        logo_height = int(base_logo_height * (scr.height() / 1080))
 
         # Central container
         container = QWidget()
         vmain = QVBoxLayout(container)
         vmain.setSpacing(spacing)
+        vmain.setContentsMargins(margin, margin, margin, margin)
         self.setCentralWidget(container)
-
-        # Maximize window on startup
-        self.resize(1024, 768)
 
         # Splitter (top scroll | log)
         splitter = QSplitter(Qt.Vertical)
@@ -530,9 +529,9 @@ class GridFlowGUI(QMainWindow):
         upper = QWidget()
         ulay = QVBoxLayout(upper)
         ulay.setSpacing(spacing)
-        # Adjusted stretch factors to minimize header and maximize form
-        ulay.setStretch(0, 1)  # Header card (reduced to ~10%)
-        ulay.setStretch(1, 8)  # Form card (maximized to ~80%)
+        ulay.setContentsMargins(0, 0, 0, 0)
+        ulay.setStretch(0, 1)  # Header card (~10%)
+        ulay.setStretch(1, 8)  # Form card (~80%)
         ulay.setStretch(2, 1)  # Workers/buttons row (~10%)
         top_scroll.setWidget(upper)
 
@@ -561,11 +560,11 @@ class GridFlowGUI(QMainWindow):
 
         halo = QWidget(objectName="halo")
         halo_l = QVBoxLayout(halo)
-        halo_l.setContentsMargins(10, 10, 10, 10)  # Reduced margins for smaller logo area
+        halo_l.setContentsMargins(10, 10, 10, 10)
         halo_l.addWidget(self.logo_lbl, 0, Qt.AlignCenter)
         h.addWidget(halo)
 
-        # Picker form (unchanged)
+        # Picker form
         header_form = QFormLayout()
         header_form.setLabelAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         header_form.setHorizontalSpacing(20)
@@ -604,7 +603,7 @@ class GridFlowGUI(QMainWindow):
         h.addLayout(header_form)
         ulay.addWidget(header)
 
-        # FORM CARD (scrollable) - maximized
+        # FORM CARD (scrollable)
         form_card = QWidget(objectName="card")
         form_l = QVBoxLayout(form_card)
         form_l.setContentsMargins(margin, margin, margin, margin)
@@ -631,7 +630,7 @@ class GridFlowGUI(QMainWindow):
         self.arg_widgets = {}
         ulay.addWidget(form_card)
 
-        # Workers + verbosity + buttons (unchanged)
+        # Workers + verbosity + buttons
         cfg_row = QHBoxLayout()
         cfg_row.addWidget(QLabel("Workers:"))
         self.workers_edit = QLineEdit("4")
@@ -650,6 +649,7 @@ class GridFlowGUI(QMainWindow):
         self.start_btn = QPushButton("▶ Start")
         self.stop_btn = QPushButton("■ Stop")
         self.stop_btn.setEnabled(False)
+        self.stop_btn.setToolTip("Not yet Implemented")
         btn_row.addWidget(self.start_btn)
         btn_row.addWidget(self.stop_btn)
         btn_row.setSpacing(15)
@@ -673,21 +673,90 @@ class GridFlowGUI(QMainWindow):
         log_layout.addWidget(self.log_text)
         splitter.addWidget(log_container)
 
-        splitter.setCollapsible(0, False)  # Prevent top from collapsing
-        splitter.setCollapsible(1, True)   # Allow log to collapse
+        splitter.setCollapsible(0, False)
+        splitter.setCollapsible(1, True)
 
-        # Set splitter sizes for 70% top, 30% log
-        total_height = 768  # Default window height
+        # Set splitter sizes
+        total_height = 768
         saved = QSettings(_SETTINGS_ORG, _SETTINGS_APP).value("split_sizes")
         if saved:
             splitter.setSizes([int(s) for s in saved])
         else:
             splitter.setSizes([int(total_height * 0.7), int(total_height * 0.3)])
 
+        # Command Display (moved to bottom, above footer)
+        command_wrapper = QWidget()
+        command_layout = QHBoxLayout(command_wrapper)
+        command_layout.setContentsMargins(0, 0, 0, 0)
+        command_layout.setSpacing(6)
+
+        # calculate a font‐based minimum height
+        fm = QFontMetrics(self.font())  
+        min_height = fm.height() * 2  # two lines tall
+
+        # 1) Command text area
+        self.command_display = QTextEdit()
+        self.command_display.setReadOnly(True)
+        self.command_display.setWordWrapMode(QtGui.QTextOption.NoWrap)
+        # expand horizontally, but at least min_height vertically
+        self.command_display.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
+        self.command_display.setMinimumHeight(min_height)
+        self.command_display.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.command_display.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.command_display.setVisible(False)
+        self.command_display.setStyleSheet("""
+            QTextEdit {
+                font-size: 11pt;
+                color: #fff;
+                background: #4a90e2;
+                padding: 6px;
+                border-radius: 4px;
+                border: none;
+            }
+        """)
+        command_layout.addWidget(self.command_display, 1)
+
+        # allow horizontal scroll with mouse‐wheel
+        def wheelEvent(evt):
+            delta = evt.angleDelta().y()
+            if delta:
+                sb = self.command_display.horizontalScrollBar()
+                sb.setValue(sb.value() - delta)
+        self.command_display.wheelEvent = wheelEvent
+
+        # 2) Copy button
+        self.copy_button = QPushButton("Copy Command")
+        # expand only if needed but never below min_height
+        self.copy_button.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Minimum)
+        self.copy_button.setMinimumHeight(min_height)
+        self.copy_button.setStyleSheet("""
+            QPushButton {
+                font-size: 11pt;
+                background: #006494;
+                color: #fff;
+                padding: 8px 12px;
+                border-radius: 4px;
+                border: none;
+            }
+            QPushButton:hover   { background: #0a77b6; }
+            QPushButton:pressed { background: #00517a; }
+        """)
+        self.copy_button.setVisible(False)
+        self.copy_button.clicked.connect(self.copy_command)
+        command_layout.addWidget(self.copy_button, 0)
+
+        # insert into splitter
+        splitter.addWidget(command_wrapper)
+        splitter.setStretchFactor(2, 0)
+        splitter.setCollapsible(2, False)
+
         # Footer
         footer = QLabel(COPYRIGHT_TEXT, alignment=Qt.AlignCenter)
         footer.setStyleSheet("color: rgba(0,0,0,0.7); font-size: 10pt; margin-top: 4px;")
         vmain.addWidget(footer)
+
+        total_h = QApplication.primaryScreen().size().height()
+        splitter.setSizes([int(total_h*0.70), int(total_h*0.25), command_wrapper.sizeHint().height()])
 
         # Menu-bar, theming, startup
         about_act = QAction("&About GridFlow..", self)
@@ -713,7 +782,7 @@ class GridFlowGUI(QMainWindow):
             font_menu.addAction(act)
             self.font_size_actions[size] = act
 
-        # Set initial font size based on screen size
+        # Set initial font size
         if small_screen:
             self.set_font_size(12)
         else:
@@ -730,6 +799,23 @@ class GridFlowGUI(QMainWindow):
         QTimer.singleShot(500, self.maybe_show_tutorial)
         self.skill_combo.setCurrentText("Beginner")
         QTimer.singleShot(0, self.logo_anim.start)
+
+    def on_task_stopped(self):
+        self.log_text.append("✅ Task stopped")
+        self.start_btn.setEnabled(True)
+        self.stop_btn.setEnabled(False)
+        self.stop_btn.setText("Stop")
+        self.progress_bar.setValue(0)
+        if self.skill_combo.currentText() == "Advanced":
+            current_text = self.command_display.toPlainText()
+            updated_text = current_text.replace("Running:", "<b>Stopped:</b>")
+            self.command_display.setHtml(updated_text)
+            self.command_display.setStyleSheet("font-size: 11pt; font-weight: normal; color: #ffffff; background: #fd7e14; padding: 8px; border-radius: 4px; border: none;")  # Orange for stopped
+            self.command_display.setVisible(True)
+            self.copy_button.setVisible(True)
+        else:
+            self.command_display.setVisible(False)
+            self.copy_button.setVisible(False)
 
     def update_logo_pixmap(self):
         # Cache the scaled pixmap to avoid repeated scaling
@@ -843,7 +929,7 @@ class GridFlowGUI(QMainWindow):
         def add_line(label, default="", tip="", indent=0, vocab=None, required=False):
             w = QLineEdit(default)
             w.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-            w.setToolTip(tip)  # This line sets the hover text
+            w.setToolTip(tip)  # Updated tooltips will be passed here
             w.setPlaceholderText(f"Enter {label.lower()}…" if not required else f"Enter {label.lower()} (required)")
             if vocab:
                 comp = QCompleter(vocab, w)
@@ -863,7 +949,7 @@ class GridFlowGUI(QMainWindow):
 
         def add_file(label, default="", tip="", dir_=False, indent=0, required: bool = False):
             le = QLineEdit(default)
-            le.setToolTip(tip)
+            le.setToolTip(tip)  # Updated tooltips will be passed here
             le.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
             placeholder = f"Select {label.lower()}"
             if required:
@@ -893,7 +979,7 @@ class GridFlowGUI(QMainWindow):
         def add_chk(label, val=False, tip="", indent=0):
             ck = QCheckBox()
             ck.setChecked(val)
-            ck.setToolTip(tip)
+            ck.setToolTip(tip)  # Updated tooltips will be passed here
             # Set objectName for specific checkboxes to apply custom styling
             if label in ["Latest", "No Verify SSL"]:
                 ck.setObjectName("largeCheckbox")
@@ -905,7 +991,7 @@ class GridFlowGUI(QMainWindow):
             cb.addItems(opts)
             if default:
                 cb.setCurrentText(default)
-            cb.setToolTip(tip)
+            cb.setToolTip(tip)  # Updated tooltips will be passed here
             self.form_layout.addRow(mk_label(label, indent=indent), cb)
             self.arg_widgets[label.lower().replace(" ", "_")] = cb
 
@@ -921,40 +1007,48 @@ class GridFlowGUI(QMainWindow):
                 self.arg_widgets["project"] = proj_le
                 # -------------------------------------------------
 
-                add_line("Activity", "ScenarioMIP", "Activity ID for the CMIP6 dataset.",
-                        indent=indent_amount, vocab=self.cmip6_activity_id, required=True)
-                add_line("Experiment", "ssp585", "Experiment ID for the dataset.",
-                        indent=indent_amount, vocab=self.cmip6_experiment_id, required=False)
-                add_line("Variable", "tas", "Variable ID to download.",
-                        indent=indent_amount, vocab=self.cmip6_variable_id, required=True)
-                add_line("Frequency", "mon", "Time frequency of the data.",
-                        indent=indent_amount, vocab=self.cmip6_frequency, required=True)
-                add_line("Model", "", "Model/source ID.",
-                        indent=indent_amount, vocab=self.cmip6_source_id, required=False)
-                add_line("Resolution", "100 km", "Nominal resolution of the data.", 
-                         indent=indent_amount, vocab=self.cmip6_resolution, required=True)
-                add_line("Ensemble", "r1i1p1f1", "Variant label/ensemble member.",
-                        indent=indent_amount, vocab=self.cmip6_variant_label, required=False)
-                add_line("Institution", "", "Institution ID.",
-                        indent=indent_amount, vocab=self.cmip6_institution_id, required=False)
-                add_line("Source Type", "", "Source type of the model.",
-                        indent=indent_amount, vocab=self.cmip6_source_type, required=False)
-                add_line("Grid Label", "", "Grid label for the dataset.",
-                        indent=indent_amount, vocab=self.cmip6_grid_label, required=False)
-                add_line("Start Date", "", "Start date for data filtering.", indent=indent_amount, required=False)
-                add_line("End Date", "", "End date for data filtering.", indent=indent_amount, required=False)
-                add_chk("Latest", True, "Check to download only the latest version.", indent=indent_amount)
-                add_line("Extra Params", "", "Additional query parameters as JSON string.", indent=indent_amount, required=False)
-                add_file("Output Dir", "cmip6_data", "Directory to save downloaded NetCDF files.", dir_=True, indent=indent_amount, required=True)
-                add_file("Metadata Dir", "metadata", "Directory to save metadata JSON files.", dir_=True, indent=indent_amount, required=True)
-                add_combo("Save Mode", ["flat", "structured"], "flat", "File organization: flat or structured.", indent=indent_amount)
-                add_line("Max Downloads", "10", "Maximum number of files to download.", indent=indent_amount, required=False)
+                add_line("Activity", "ScenarioMIP", "The CMIP6 activity or program (e.g., ScenarioMIP, CMIP).",
+                            indent=indent_amount, vocab=self.cmip6_activity_id, required=True)
+                add_line("Experiment", "ssp585", "The experiment identifier (e.g., ssp585, historical).",
+                            indent=indent_amount, vocab=self.cmip6_experiment_id, required=False)
+                add_line("Variable", "tas", "The climate variable to download (e.g., tas for temperature).",
+                            indent=indent_amount, vocab=self.cmip6_variable_id, required=True)
+                add_line("Frequency", "mon", "The temporal frequency of the data (e.g., mon, day).",
+                            indent=indent_amount, vocab=self.cmip6_frequency, required=True)
+                add_line("Model", "", "The climate model/source ID (e.g., CanESM5).",
+                            indent=indent_amount, vocab=self.cmip6_source_id, required=False)
+                add_line("Resolution", "100 km", "The nominal resolution of the data (e.g., 100 km).",
+                            indent=indent_amount, vocab=self.cmip6_resolution, required=True)
+                add_line("Ensemble", "r1i1p1f1", "The ensemble member or variant label (e.g., r1i1p1f1).",
+                            indent=indent_amount, vocab=self.cmip6_variant_label, required=False)
+                add_line("Institution", "", "The institution responsible for the model (e.g., CCCma).",
+                            indent=indent_amount, vocab=self.cmip6_institution_id, required=False)
+                add_line("Source Type", "", "The type of model (e.g., AOGCM).",
+                            indent=indent_amount, vocab=self.cmip6_source_type, required=False)
+                add_line("Grid Label", "", "The grid label for the dataset (e.g., gn).",
+                            indent=indent_amount, vocab=self.cmip6_grid_label, required=False)
+                add_line("Start Date", "", "Filter data starting from this date (format: YYYY-MM-DD).",
+                            indent=indent_amount, required=False)
+                add_line("End Date", "", "Filter data up to this date (format: YYYY-MM-DD).",
+                            indent=indent_amount, required=False)
+                add_chk("Latest", True, "If checked, downloads only the latest version of each file.",
+                        indent=indent_amount)
+                add_line("Extra Params", "", "Additional query parameters in JSON format (e.g., {\"key\": \"value\"}).",
+                            indent=indent_amount, required=False)
+                add_file("Output Dir", "cmip6_data", "The directory where downloaded NetCDF files will be saved.",
+                            dir_=True, indent=indent_amount, required=True)
+                add_file("Metadata Dir", "metadata", "The directory where metadata JSON files will be saved.",
+                            dir_=True, indent=indent_amount, required=True)
+                add_combo("Save Mode", ["flat", "structured"], "flat", "Choose 'flat' for a single directory or 'structured' for a hierarchical organization.",
+                            indent=indent_amount)
+                add_line("Max Downloads", "10", "The maximum number of files to download (leave blank for no limit).",
+                            indent=indent_amount, required=False)
                 self.arg_widgets["max_downloads"].setText("10")
 
                 # ---- Advanced Options Toggle ----------------------------------
                 adv_chk = QCheckBox("Show advanced options")
                 adv_chk.setObjectName("largeCheckbox")
-                adv_chk.setToolTip("Toggle retries, SSL and other advanced flags")
+                adv_chk.setToolTip("Show additional options for retries, timeouts, and authentication.")
                 self.form_layout.addRow(mk_label("", indent_amount), adv_chk)
 
                 adv_widget = QWidget()
@@ -962,26 +1056,29 @@ class GridFlowGUI(QMainWindow):
                 adv_layout.setContentsMargins(0, 0, 0, 0)
 
                 retries_le = QLineEdit("3")
-                retries_le.setToolTip("Number of download retry attempts.")
+                retries_le.setToolTip("The number of times to retry a failed download (default: 3).")
                 adv_layout.addRow(mk_label("Retries", indent_amount), retries_le)
 
                 timeout_le = QLineEdit("30")
-                timeout_le.setToolTip("HTTP request timeout in seconds.")
+                timeout_le.setToolTip("The HTTP request timeout in seconds (default: 30).")
                 adv_layout.addRow(mk_label("Timeout", indent_amount), timeout_le)
 
                 no_ssl_ck = QCheckBox()
                 no_ssl_ck.setObjectName("largeCheckbox")
                 no_ssl_ck.setChecked(False)
-                no_ssl_ck.setToolTip("Disable SSL verification for downloads.")
+                no_ssl_ck.setToolTip("Disable SSL verification for downloads (not recommended).")
                 adv_layout.addRow(mk_label("No Verify SSL", indent_amount), no_ssl_ck)
 
                 user_le = QLineEdit("")
+                user_le.setToolTip("Username for authenticated downloads (if required).")
                 adv_layout.addRow(mk_label("Username", indent_amount), user_le)
 
                 pass_le = QLineEdit("")
+                pass_le.setToolTip("Password for authenticated downloads (if required).")
                 adv_layout.addRow(mk_label("Password", indent_amount), pass_le)
 
                 retry_file = QLineEdit("")
+                retry_file.setToolTip("Path to a file listing failed downloads to retry.")
                 browse_retry = QPushButton("Browse")
                 browse_retry.clicked.connect(lambda: self.browse_file(retry_file, False))
                 retry_wrap = QWidget()
@@ -1004,7 +1101,7 @@ class GridFlowGUI(QMainWindow):
                 self.arg_widgets["retry_failed"] = retry_file
 
             elif src == "CMIP5":
-                # ---- lock "Project" at CMIP6 --------------------
+                # ---- lock "Project" at CMIP5 --------------------
                 proj_le = QLineEdit("CMIP5")
                 proj_le.setReadOnly(True)
                 proj_le.setEnabled(False)
@@ -1012,31 +1109,39 @@ class GridFlowGUI(QMainWindow):
                 self.arg_widgets["project"] = proj_le
                 # -------------------------------------------------
 
-                add_line("Model", "CanESM2", "Model name.",
-                        indent=indent_amount, vocab=self.cmip5_model, required=True)
-                add_line("Experiment", "historical", "Experiment ID.",
-                        indent=indent_amount, vocab=self.cmip5_experiment, required=False)
-                add_line("Variable", "tas", "Variable name.",
-                        indent=indent_amount, vocab=self.cmip5_variable, required=True)
-                add_line("Time Frequency", "mon", "Time frequency.",
-                        indent=indent_amount, vocab=self.cmip5_time_frequency, required=True)
-                add_line("Ensemble", "r1i1p1", "Ensemble member.",
-                        indent=indent_amount, vocab=self.cmip5_ensemble, required=False)
-                add_line("Institute", "", "Institute name.",
-                        indent=indent_amount, vocab=self.cmip5_institute, required=False)
-                add_line("Start Date", "", "Start date for data filtering.", indent=indent_amount, required=False)
-                add_line("End Date", "", "End date for data filtering.", indent=indent_amount, required=False)
-                add_chk("Latest", True, "Check to download only the latest version.", indent=indent_amount)
-                add_line("Extra Params", "", "Additional query parameters as JSON string.", indent=indent_amount, required=False)
-                add_file("Output Dir", "cmip5_data", "Directory to save downloaded NetCDF files.", dir_=True, indent=indent_amount, required=True)
-                add_file("Metadata Dir", "metadata", "Directory to save metadata JSON files.", dir_=True, indent=indent_amount, required=True)
-                add_combo("Save Mode", ["flat", "structured"], "flat", "File organization: flat or structured.", indent=indent_amount)
-                add_line("Max Downloads", "", "Maximum number of files to download.", indent=indent_amount, required=False)
+                add_line("Model", "CanESM2", "The CMIP5 model name (e.g., CanESM2).",
+                            indent=indent_amount, vocab=self.cmip5_model, required=True)
+                add_line("Experiment", "historical", "The experiment identifier (e.g., historical, rcp45).",
+                            indent=indent_amount, vocab=self.cmip5_experiment, required=False)
+                add_line("Variable", "tas", "The climate variable to download (e.g., tas for temperature).",
+                            indent=indent_amount, vocab=self.cmip5_variable, required=True)
+                add_line("Time Frequency", "mon", "The temporal frequency of the data (e.g., mon, day).",
+                            indent=indent_amount, vocab=self.cmip5_time_frequency, required=True)
+                add_line("Ensemble", "r1i1p1", "The ensemble member (e.g., r1i1p1).",
+                            indent=indent_amount, vocab=self.cmip5_ensemble, required=False)
+                add_line("Institute", "", "The institute responsible for the model (e.g., CCCma).",
+                            indent=indent_amount, vocab=self.cmip5_institute, required=False)
+                add_line("Start Date", "", "Filter data starting from this date (format: YYYY-MM-DD).",
+                            indent=indent_amount, required=False)
+                add_line("End Date", "", "Filter data up to this date (format: YYYY-MM-DD).",
+                            indent=indent_amount, required=False)
+                add_chk("Latest", True, "If checked, downloads only the latest version of each file.",
+                        indent=indent_amount)
+                add_line("Extra Params", "", "Additional query parameters in JSON format (e.g., {\"key\": \"value\"}).",
+                            indent=indent_amount, required=False)
+                add_file("Output Dir", "cmip5_data", "The directory where downloaded NetCDF files will be saved.",
+                            dir_=True, indent=indent_amount, required=True)
+                add_file("Metadata Dir", "metadata", "The directory where metadata JSON files will be saved.",
+                            dir_=True, indent=indent_amount, required=True)
+                add_combo("Save Mode", ["flat", "structured"], "flat", "Choose 'flat' for a single directory or 'structured' for a hierarchical organization.",
+                            indent=indent_amount)
+                add_line("Max Downloads", "", "The maximum number of files to download (leave blank for no limit).",
+                            indent=indent_amount, required=False)
 
                 # --- Advanced Options Toggle --------------------------
                 adv_chk = QCheckBox("Show advanced options")
                 adv_chk.setObjectName("largeCheckbox")
-                adv_chk.setToolTip("Toggle retries, SSL and other advanced flags")
+                adv_chk.setToolTip("Show additional options for retries, timeouts, and authentication.")
                 self.form_layout.addRow(mk_label("", indent_amount), adv_chk)
 
                 adv_widget = QWidget()
@@ -1044,29 +1149,33 @@ class GridFlowGUI(QMainWindow):
                 adv_layout.setContentsMargins(0, 0, 0, 0)
 
                 retries_le = QLineEdit("3")
-                retries_le.setToolTip("Number of download retry attempts.")
+                retries_le.setToolTip("The number of times to retry a failed download (default: 3).")
                 adv_layout.addRow(mk_label("Retries", indent_amount), retries_le)
 
                 timeout_le = QLineEdit("30")
-                timeout_le.setToolTip("HTTP request timeout in seconds.")
+                timeout_le.setToolTip("The HTTP request timeout in seconds (default: 30).")
                 adv_layout.addRow(mk_label("Timeout", indent_amount), timeout_le)
 
                 user_le = QLineEdit("")
+                user_le.setToolTip("Username for authenticated downloads (if required).")
                 adv_layout.addRow(mk_label("Username", indent_amount), user_le)
 
                 pass_le = QLineEdit("")
+                pass_le.setToolTip("Password for authenticated downloads (if required).")
                 adv_layout.addRow(mk_label("Password", indent_amount), pass_le)
 
                 openid_le = QLineEdit("")
+                openid_le.setToolTip("OpenID URL for CMIP5 authentication (if required).")
                 adv_layout.addRow(mk_label("OpenID", indent_amount), openid_le)
 
                 no_ssl_ck = QCheckBox()
                 no_ssl_ck.setObjectName("largeCheckbox")
                 no_ssl_ck.setChecked(False)
-                no_ssl_ck.setToolTip("Disable SSL verification for downloads.")
+                no_ssl_ck.setToolTip("Disable SSL verification for downloads (not recommended).")
                 adv_layout.addRow(mk_label("No Verify SSL", indent_amount), no_ssl_ck)
 
                 retry_file = QLineEdit("")
+                retry_file.setToolTip("Path to a file listing failed downloads to retry.")
                 browse_retry = QPushButton("Browse")
                 browse_retry.clicked.connect(lambda: self.browse_file(retry_file, False))
                 retry_wrap = QWidget()
@@ -1090,34 +1199,52 @@ class GridFlowGUI(QMainWindow):
                 self.arg_widgets["retry_failed"] = retry_file
 
             else:  # PRISM
-                add_combo("Variable", ["ppt", "tmax", "tmin", "tmean", "tdmean", "vpdmin", "vpdmax"], "tmean", "Climate variable to download.", indent=indent_amount)
-                add_combo("Resolution", ["4km", "800m"], "4km", "Spatial resolution.", indent=indent_amount)
-                add_combo("Time Step", ["daily", "monthly"], "daily", "Temporal resolution.", indent=indent_amount)
-                add_line("Start Date", "2020-01-01", "Start date for data.", indent=indent_amount, required=True)
-                add_line("End Date", "2020-01-04", "End date for data.", indent=indent_amount, required=True)
-                add_file("Output Dir", "prism_data", "Directory to save downloaded files.", dir_=True, indent=indent_amount, required=True)
-                add_file("Metadata Dir", "metadata", "Directory to save metadata files.", dir_=True, indent=indent_amount, required=True)
-                add_line("Retries", "3", "Number of download retry attempts.", indent=indent_amount, required=False)
-                add_line("Timeout", "30", "HTTP request timeout in seconds.", indent=indent_amount, required=False)
+                add_combo("Variable", ["ppt", "tmax", "tmin", "tmean", "tdmean", "vpdmin", "vpdmax"], "tmean",
+                            "The PRISM climate variable (e.g., tmean for mean temperature).", indent=indent_amount)
+                add_combo("Resolution", ["4km", "800m"], "4km", "The spatial resolution of PRISM data (4km or 800m).",
+                            indent=indent_amount)
+                add_combo("Time Step", ["daily", "monthly"], "daily", "The temporal resolution (daily or monthly).",
+                            indent=indent_amount)
+                add_line("Start Date", "2020-01-01", "The start date for PRISM data (format: YYYY-MM-DD or YYYY-MM).",
+                            indent=indent_amount, required=True)
+                add_line("End Date", "2020-01-04", "The end date for PRISM data (format: YYYY-MM-DD or YYYY-MM).",
+                            indent=indent_amount, required=True)
+                add_file("Output Dir", "prism_data", "The directory where downloaded PRISM files will be saved.",
+                            dir_=True, indent=indent_amount, required=True)
+                add_file("Metadata Dir", "metadata", "The directory where PRISM metadata files will be saved.",
+                            dir_=True, indent=indent_amount, required=True)
+                add_line("Retries", "3", "The number of times to retry a failed download (default: 3).",
+                            indent=indent_amount, required=False)
+                add_line("Timeout", "30", "The HTTP request timeout in seconds (default: 30).",
+                            indent=indent_amount, required=False)
 
         elif process == "Spatial Crop":
-            add_file("Input Dir", "cmip6_data", "Directory containing input NetCDF files.", dir_=True, required=True)
-            add_file("Output Dir", "cmip6_cropped_data", "Directory to save cropped NetCDF files.", dir_=True, required=True)
-            add_line("Min Lat", "35.0", "Minimum latitude bound.", required=True)
-            add_line("Max Lat", "45.0", "Maximum latitude bound.", required=True)
-            add_line("Min Lon", "-105.0", "Minimum longitude bound.", required=True)
-            add_line("Max Lon", "-95.0", "Maximum longitude bound.", required=True)
-            add_line("Buffer KM", "50.0", "Buffer distance in kilometers.", required=False)
+            add_file("Input Dir", "cmip6_data", "The directory containing NetCDF files to crop.",
+                        dir_=True, required=True)
+            add_file("Output Dir", "cmip6_cropped_data", "The directory to save cropped NetCDF files.",
+                        dir_=True, required=True)
+            add_line("Min Lat", "35.0", "The minimum latitude for cropping (degrees).", required=True)
+            add_line("Max Lat", "45.0", "The maximum latitude for cropping (degrees).", required=True)
+            add_line("Min Lon", "-105.0", "The minimum longitude for cropping (degrees).", required=True)
+            add_line("Max Lon", "-95.0", "The maximum longitude for cropping (degrees).", required=True)
+            add_line("Buffer KM", "50.0", "The buffer distance in kilometers to add around the bounding box (optional).",
+                        required=False)
 
         elif process == "Spatial Clip":
-            add_file("Input Dir", "cmip6_data", "Directory containing input NetCDF files.", dir_=True, required=True)
-            add_file("Shapefile Path", "", "Path to shapefile for clipping.", dir_=False, required=True)
-            add_line("Buffer KM", "20.0", "Buffer distance in kilometers.", required=False)
-            add_file("Output Dir", "cmip6_clipped_data", "Directory to save clipped NetCDF files.", dir_=True, required=True)
+            add_file("Input Dir", "cmip6_data", "The directory containing NetCDF files to clip.",
+                        dir_=True, required=True)
+            add_file("Shapefile Path", "", "The path to a shapefile (.shp) defining the clipping boundary.",
+                        dir_=False, required=True)
+            add_line("Buffer KM", "20.0", "The buffer distance in kilometers to add around the shapefile (optional).",
+                        required=False)
+            add_file("Output Dir", "cmip6_clipped_data", "The directory to save clipped NetCDF files.",
+                        dir_=True, required=True)
 
         elif process == "Catalog Build":
-            add_file("Input Dir", "cmip6_data", "Directory containing NetCDF files to catalog.", dir_=True, required=True)
-            add_file("Output Dir", "catalog", "Directory to save catalog JSON file.", dir_=True, required=True)
+            add_file("Input Dir", "cmip6_data", "The directory containing NetCDF files to include in the catalog.",
+                        dir_=True, required=True)
+            add_file("Output Dir", "catalog", "The directory to save the generated catalog JSON file.",
+                        dir_=True, required=True)
 
         if is_first_run() and process == self.proc_combo.currentText():
             if process == "Download":
@@ -1285,12 +1412,75 @@ class GridFlowGUI(QMainWindow):
         args_dict["latest"] = args_dict.get("latest", True)
         args_dict["extra_params"] = args_dict.get("extra_params", None)
 
+        # Construct the command string
+        src, proc = self.src_combo.currentText(), self.proc_combo.currentText()
+        command_parts = ["gridflow"]
+
+        # Map the process to the command-line subcommand
+        process_map = {
+            "Download": "download",
+            "Spatial Crop": "crop",
+            "Spatial Clip": "clip",
+            "Catalog Build": "catalog"
+        }
+        subcommand = process_map.get(proc, proc.lower())
+        command_parts.append(subcommand)
+
+        # Add arguments based on the process and source
+        if proc == "Download":
+            if src in ["CMIP6", "CMIP5"]:
+                for key in ["project", "activity", "experiment", "variable", "frequency", "model", "resolution",
+                            "ensemble", "institution", "source_type", "grid_label", "start_date", "end_date",
+                            "extra_params", "output_dir", "metadata_dir", "save_mode", "max_downloads", "retries",
+                            "timeout", "id", "password", "openid", "retry_failed"]:
+                    if key in args_dict and args_dict[key]:
+                        command_parts.append(f"--{key.replace('_', '-')} \"{args_dict[key]}\"")
+                if args_dict.get("latest"):
+                    command_parts.append("--latest")
+                if args_dict.get("no_verify_ssl"):
+                    command_parts.append("--no-verify-ssl")
+            else:  # PRISM
+                for key in ["variable", "resolution", "time_step", "start_date", "end_date", "output_dir",
+                            "metadata_dir", "retries", "timeout"]:
+                    if key in args_dict and args_dict[key]:
+                        command_parts.append(f"--{key.replace('_', '-')} \"{args_dict[key]}\"")
+        elif proc == "Spatial Crop":
+            for key in ["input_dir", "output_dir", "min_lat", "max_lat", "min_lon", "max_lon", "buffer_km"]:
+                if key in args_dict and args_dict[key]:
+                    command_parts.append(f"--{key.replace('_', '-')} \"{args_dict[key]}\"")
+        elif proc == "Spatial Clip":
+            for key in ["input_dir", "shapefile_path", "buffer_km", "output_dir"]:
+                if key in args_dict and args_dict[key]:
+                    command_parts.append(f"--{key.replace('_', '-')} \"{args_dict[key]}\"")
+        elif proc == "Catalog Build":
+            for key in ["input_dir", "output_dir"]:
+                if key in args_dict and args_dict[key]:
+                    command_parts.append(f"--{key.replace('_', '-')} \"{args_dict[key]}\"")
+
+        # Add workers and log-level
+        if args_dict["workers"]:
+            command_parts.append(f"--workers {args_dict['workers']}")
+        if args_dict["log_level"]:
+            command_parts.append(f"--log-level {args_dict['log_level']}")
+
+        # Join the command parts into a single string
+        command_str = " ".join(command_parts)
+
+        # Show the command if in Advanced mode
+        if self.skill_combo.currentText() == "Advanced":
+            self.command_display.setText(f"Running: {command_str}")
+            self.command_display.setStyleSheet("font-size: 12pt; font-weight: bold; color: #ffffff; background: #4a90e2; padding: 8px; border-radius: 4px; border: none;")
+            self.command_display.setVisible(True)
+            self.copy_button.setVisible(True)
+        else:
+            self.command_display.setVisible(False)
+            self.copy_button.setVisible(False)
+
         class _Args:
             def __init__(self, **kw):
                 self.__dict__.update(kw)
         cli_args = _Args(**args_dict)
 
-        src, proc = self.src_combo.currentText(), self.proc_combo.currentText()
         dispatch = {
             ("CMIP6", "Download"): download_command,
             ("CMIP5", "Download"): download_cmip5_command,
@@ -1336,6 +1526,22 @@ class GridFlowGUI(QMainWindow):
         self.stop_btn.setEnabled(False)
         self.stop_btn.setText("Stop")
         self.progress_bar.setValue(0)
+        if self.skill_combo.currentText() == "Advanced":
+            current_text = self.command_display.text()
+            self.command_display.setText(current_text.replace("Running:", "Stopped:"))
+            self.command_display.setStyleSheet("font-size: 12pt; font-weight: bold; color: #ffffff; background: #fd7e14; padding: 8px; border-radius: 4px; border: none;")  # Orange for stopped
+            self.command_display.setVisible(True)
+            self.copy_button.setVisible(True)
+        else:
+            self.command_display.setVisible(False)
+            self.copy_button.setVisible(False)
+
+    def copy_command(self):
+        command_text = self.command_display.toPlainText()
+        # Remove the "Running:", "Completed:", "Failed:", or "Stopped:" prefix
+        command = command_text.split(":", 1)[1].strip() if ":" in command_text else command_text
+        QApplication.clipboard().setText(command)
+        self.log_text.append("📋 Command copied to clipboard")
 
     def on_stopping(self):
         if self.worker_thread and self.worker_thread.force_stop:
@@ -1357,6 +1563,19 @@ class GridFlowGUI(QMainWindow):
         self.stop_btn.setEnabled(False)
         self.progress_bar.setValue(0)
         self.log_text.append("✅ Task completed" if ok else "❌ Task failed")
+        if self.skill_combo.currentText() == "Advanced":
+            current_text = self.command_display.toPlainText()
+            if ok:
+                self.command_display.setText(current_text.replace("Running:", "Completed:"))
+                self.command_display.setStyleSheet("font-size: 12pt; font-weight: bold; color: #ffffff; background: #28a745; padding: 8px; border-radius: 4px; border: none;")  # Green for success
+            else:
+                self.command_display.setText(current_text.replace("Running:", "Failed:"))
+                self.command_display.setStyleSheet("font-size: 12pt; font-weight: bold; color: #ffffff; background: #dc3545; padding: 8px; border-radius: 4px; border: none;")  # Red for failure
+            self.command_display.setVisible(True)
+            self.copy_button.setVisible(True)
+        else:
+            self.command_display.setVisible(False)
+            self.copy_button.setVisible(False)
 
     def show_about(self):
         QMessageBox.about(self, "About GridFlow", ABOUT_DIALOG_HTML)
