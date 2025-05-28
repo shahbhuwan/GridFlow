@@ -16,14 +16,15 @@
 import os
 import sys
 import json
+import threading
 import time
 import logging
 import requests
 from pathlib import Path
-from threading import Lock, Event
+from threading import Lock
 from datetime import datetime
-from hashlib import md5, sha256
 from gridflow import __version__
+from .thread_stopper import ThreadManager
 from urllib.parse import urlencode
 from typing import List, Dict, Optional, Tuple
 from concurrent.futures import ThreadPoolExecutor, as_completed, Future
@@ -38,22 +39,17 @@ ESGF_NODES = [
 ]
 
 class InterruptibleSession(requests.Session):
-    def __init__(self, stop_event: Event):
+    def __init__(self):
         super().__init__()
-        self.stop_event = stop_event
         # Configure retries and timeouts
         retries = Retry(total=3, backoff_factor=1, status_forcelist=[429, 500, 502, 503, 504])
         self.mount("http://", HTTPAdapter(max_retries=retries))
         self.mount("https://", HTTPAdapter(max_retries=retries))
 
     def get(self, url, **kwargs):
-        # Set a short read timeout to allow frequent stop checks
+        # Set a short read timeout
         kwargs.setdefault("timeout", (5, 1))  # (connect_timeout, read_timeout)
-        response = super().get(url, **kwargs)
-        if self.stop_event.is_set():
-            response.close()
-            raise requests.exceptions.RequestException("Download interrupted by user")
-        return response
+        return super().get(url, **kwargs)
 
 class FileManager:
     RESOLUTION_MAPPING = {
@@ -108,10 +104,9 @@ class FileManager:
             logging.error(f"Failed to save metadata {filename}: {e}")
 
 class QueryHandler:
-    def __init__(self, nodes: List[str] = ESGF_NODES, stop_event: Optional[Event] = None):
+    def __init__(self, nodes: List[str] = ESGF_NODES):
         self.nodes = nodes
-        self.session = InterruptibleSession(stop_event if stop_event else Event())
-        self.stop_event = stop_event
+        self.session = InterruptibleSession()
 
     def build_query(self, base_url: str, params: Dict[str, str]) -> str:
         query_params = {
@@ -128,9 +123,6 @@ class QueryHandler:
         files = []
         seen_ids = set()
         for node in self.nodes:
-            if self.stop_event and self.stop_event.is_set():
-                logging.info("Stopping query due to stop event")
-                return files
             try:
                 logging.info(f"Trying to connect to {node}")
                 node_files = self._fetch_from_node(node, params, timeout)
@@ -152,16 +144,12 @@ class QueryHandler:
                 logging.error(f"Unexpected error while querying {node}: {str(e)} (Type: {type(e).__name__})")
                 continue
         logging.error("All nodes failed to respond or no files were found")
-        sys.exit(1) 
         return files
 
     def _fetch_from_node(self, node: str, params: Dict[str, str], timeout: int) -> List[Dict]:
         files = []
         offset = 0
         while True:
-            if self.stop_event and self.stop_event.is_set():
-                logging.info("Stopping query due to stop event")
-                return files
             query_params = {**params, 'offset': str(offset)}
             query_url = self.build_query(node, query_params)
             logging.debug(f"Querying: {query_url}")
@@ -177,10 +165,10 @@ class QueryHandler:
                     break
                 offset += len(docs)
             except (requests.RequestException, ValueError) as e:
-                logging.error(f"Query failed for {node}: {str(e)} (Type: {type(e).__name__})")
+                logging.error(f"Query failed for {node}: {e} (Type: {type(e).__name__})")
                 raise
             except Exception as e:
-                logging.error(f"Unexpected error in _fetch_from_node for {node}: {str(e)} (Type: {type(e).__name__})")
+                logging.error(f"Unexpected error in _fetch_from_node for {node}: {e} (Type: {type(e).__name__})")
                 raise
         return files
 
@@ -199,9 +187,6 @@ class QueryHandler:
         params = {k: v for k, v in params.items() if v}
 
         for node in self.nodes:
-            if self.stop_event and self.stop_event.is_set():
-                logging.info("Stopping file query due to stop event")
-                return None
             try:
                 logging.info(f"Querying {node} for file {params['title']}")
                 files = self._fetch_from_node(node, params, timeout)
@@ -224,18 +209,18 @@ class Downloader:
         self.retries = retries
         self.timeout = timeout
         self.max_downloads = max_downloads
-        self.stop_event = Event()
-        self.session = InterruptibleSession(self.stop_event)
+        self.session = InterruptibleSession()
         self.verify_ssl = verify_ssl
         self.log_lock = Lock()
         self.successful_downloads = 0
-        self.query_handler = QueryHandler(stop_event=self.stop_event)
+        self.query_handler = QueryHandler()
+        self.thread_manager = ThreadManager(verbose=False)  # Initialize ThreadManager
         self.executor = None
         self.pending_futures: List[Future] = []
         if username and password:
             self.session.auth = (username, password)
             with self.log_lock:
-                logging.warning("Using basic authentication; some ESGF nodes may require OAuth or other methods. Check ESGF documentation.")
+                logging.warning("Using basic authentication; some ESGF nodes may require Auth or other methods. Check ESGF documentation.")
         elif openid:
             with self.log_lock:
                 logging.warning("OpenID provided but not implemented in this version. Downloads may fail for restricted data.")
@@ -244,10 +229,12 @@ class Downloader:
                 logging.warning("No authentication credentials provided. Downloads may fail for restricted data. Use --username and --password, or --openid for ESGF authentication.")
 
     def shutdown(self):
-        self.stop_event.set()  # Signal all operations to stop
+        self.thread_manager.stop()  # Stop all managed threads
         if self.executor:
+            with self.log_lock:
+                logging.info("Canceling all download tasks...")
             for future in self.pending_futures:
-                future.cancel()
+                future.cancel()  # Attempt to cancel all futures
             self.executor.shutdown(wait=False)  # Immediate shutdown
             self.executor = None
             self.pending_futures = []
@@ -258,29 +245,41 @@ class Downloader:
         if not checksum:
             logging.warning(f"No checksum provided for {file_path.name}")
             return True
+
         try:
-            checksum_type = file_info.get('checksum_type', ['sha256'])[0].lower()
+            # Read the full file into memory
             with open(file_path, 'rb') as f:
                 data = f.read()
-                if checksum_type == 'md5':
-                    file_hash = md5(data).hexdigest()
-                elif checksum_type == 'sha256':
-                    file_hash = sha256(data).hexdigest()
-                else:
-                    logging.warning(f"Unsupported checksum type {checksum_type} for {file_path.name}")
-                    return True
+
+            # Use hashlib directly so that tests patching hashlib.sha256()/md5() will catch it
+            import hashlib
+            checksum_type = file_info.get('checksum_type', ['sha256'])[0].lower()
+            if checksum_type == 'md5':
+                h = hashlib.md5()
+            elif checksum_type == 'sha256':
+                h = hashlib.sha256()
+            else:
+                logging.warning(f"Unsupported checksum type {checksum_type} for {file_path.name}")
+                return True
+
+            h.update(data)
+            file_hash = h.hexdigest()
+
             if file_hash == checksum:
                 return True
+
             logging.error(f"Checksum mismatch for {file_path.name}: expected {checksum}, got {file_hash}")
             return False
+
         except Exception as e:
             logging.error(f"Checksum verification failed for {file_path.name}: {e}")
             return False
 
     def download_file(self, file_info: Dict, attempt: int = 1) -> Tuple[Optional[str], Optional[Dict]]:
-        if self.stop_event.is_set():
+        # Check if shutdown is requested
+        if self.thread_manager.is_shutdown():
             with self.log_lock:
-                logging.info(f"Skipping download of {file_info.get('title', '')} due to stop event")
+                logging.info(f"Download stopped for {file_info.get('title', 'unknown')}")
             return None, file_info
 
         urls = file_info.get('url', [])
@@ -311,6 +310,11 @@ class Downloader:
                 download_url = url[0]
             else:
                 continue
+            # Check shutdown before attempting download
+            if self.thread_manager.is_shutdown():
+                with self.log_lock:
+                    logging.info(f"Download stopped for {filename}")
+                return None, file_info
             try:
                 with self.log_lock:
                     logging.info(f"Downloading {filename} from {download_url}")
@@ -319,18 +323,23 @@ class Downloader:
 
                 with open(temp_path, 'wb') as f:
                     for chunk in response.iter_content(chunk_size=8192):
-                        if self.stop_event.is_set():
+                        # Check shutdown during chunked download
+                        if self.thread_manager.is_shutdown():
                             with self.log_lock:
-                                logging.info(f"Stopping download of {filename} due to stop event")
-                            response.close()
+                                logging.info(f"Download interrupted for {filename}")
                             return None, file_info
                         if chunk:
                             f.write(chunk)
+
                 if self.verify_checksum(temp_path, file_info):
-                    temp_path.rename(output_path)
-                    with self.log_lock:
-                        logging.info(f"Downloaded {filename} to {output_path}")
-                    return str(output_path), None
+                    if temp_path.exists():
+                        temp_path.rename(output_path)
+                        with self.log_lock:
+                            logging.info(f"Downloaded {filename}")
+                        return str(output_path), None
+                    else:
+                        logging.error(f"Temp file {temp_path} does not exist during rename")
+                        return None, file_info
                 else:
                     try:
                         temp_path.unlink()
@@ -339,10 +348,6 @@ class Downloader:
                     raise ValueError("Checksum verification failed")
 
             except (requests.RequestException, ValueError) as e:
-                if self.stop_event.is_set():
-                    with self.log_lock:
-                        logging.info(f"Stopping download of {filename} due to stop event")
-                    return None, file_info
                 with self.log_lock:
                     logging.warning(f"Attempt {attempt} failed for {filename} from {download_url}: {e}")
                 if attempt <= self.retries:
@@ -369,37 +374,46 @@ class Downloader:
         completed = 0
         next_threshold = progress_interval
 
-        self.executor = ThreadPoolExecutor(max_workers=self.max_workers)
-        try:
-            self.pending_futures = [self.executor.submit(self.download_file, f) for f in files[:total_files]]
-            for future in as_completed(self.pending_futures):
-                if self.stop_event.is_set():
-                    with self.log_lock:
-                        logging.info("Download operation stopped by user")
-                    break
-                try:
-                    path, failed_info = future.result()
-                    if path:
-                        downloaded_files.append(path)
-                        if not failed_info:
-                            self.successful_downloads += 1
-                    if failed_info:
-                        failed_files.append(failed_info)
-                except Exception as e:
-                    with self.log_lock:
-                        logging.error(f"Unexpected error in download task: {e}")
-                    failed_files.append(files[self.pending_futures.index(future)])
-                completed += 1
-                with self.log_lock:
-                    if completed >= next_threshold:
-                        logging.info(f"Progress: {self.successful_downloads}/{total_files} files (Failed: {len(failed_files)})")
-                        next_threshold += progress_interval
-        finally:
-            if self.stop_event.is_set():
-                self.shutdown()
+        def worker_function(shutdown_event: threading.Event):
+            nonlocal completed, next_threshold
+            self.executor = ThreadPoolExecutor(max_workers=self.max_workers)
+            try:
+                self.pending_futures = [self.executor.submit(self.download_file, f) for f in files[:total_files]]
+                for future in as_completed(self.pending_futures):
+                    if shutdown_event.is_set():
+                        with self.log_lock:
+                            logging.info("Download tasks stopped due to shutdown signal")
+                        return
+                    try:
+                        path, failed_info = future.result()
+                        with self.log_lock:
+                            if path:
+                                downloaded_files.append(path)
+                                if not failed_info:
+                                    self.successful_downloads += 1
+                            if failed_info:
+                                failed_files.append(failed_info)
+                            completed += 1
+                            if completed >= next_threshold:
+                                logging.info(f"Progress: {self.successful_downloads}/{total_files} files (Failed: {len(failed_files)})")
+                                next_threshold += progress_interval
+                    except Exception as e:
+                        with self.log_lock:
+                            logging.error(f"Unexpected error in download task: {e}")
+                            failed_files.append(files[self.pending_futures.index(future)])
+            finally:
+                self.executor.shutdown(wait=True)
+                self.executor = None
+                self.pending_futures = []
 
-        # with self.log_lock:
-        #     logging.info(f"Progress: {self.successful_downloads}/{total_files} files (Failed: {len(failed_files)})")
+        self.thread_manager.add_worker(worker_function, f"CMIP6_Download_Worker_{phase}")
+
+        # Wait for threads to complete or stop
+        while self.thread_manager.is_running() and not self.thread_manager.is_shutdown():
+            time.sleep(0.1)
+
+        with self.log_lock:
+            logging.info(f"Completed: {self.successful_downloads}/{total_files} files (Failed: {len(failed_files)})")
         return downloaded_files, failed_files
 
     def retry_failed(self, failed_files: List[Dict]) -> Tuple[List[str], List[Dict]]:
@@ -412,64 +426,69 @@ class Downloader:
         downloaded_files = []
         remaining_failed = failed_files.copy()
         retry_round = 0
+        self.successful_downloads = 0  # Reset for retry phase
 
-        while remaining_failed and retry_round < self.retries:
-            if self.stop_event.is_set():
-                with self.log_lock:
-                    logging.info("Retry operation stopped by user")
-                return downloaded_files, remaining_failed
+        while remaining_failed and retry_round < self.retries and not self.thread_manager.is_shutdown():
             retry_round += 1
             with self.log_lock:
                 logging.info(f"Retry round {retry_round} for {len(remaining_failed)} failed files")
             current_failed = []
 
-            self.executor = ThreadPoolExecutor(max_workers=self.max_workers)
-            try:
-                self.pending_futures = []
-                for file_info in remaining_failed:
-                    if self.stop_event.is_set():
-                        with self.log_lock:
-                            logging.info("Retry operation stopped by user")
-                        break
-                    filename = file_info.get('title', 'unknown')
-                    with self.log_lock:
-                        logging.info(f"Retrying {filename} (Round {retry_round})")
-
-                    updated_file_info = self.query_handler.fetch_specific_file(file_info, self.timeout)
-                    if not updated_file_info:
-                        with self.log_lock:
-                            logging.error(f"Could not find updated metadata for {filename}, skipping retry")
-                        current_failed.append(file_info)
-                        continue
-
-                    future = self.executor.submit(self.download_file, updated_file_info)
-                    self.pending_futures.append(future)
-
-                for future in as_completed(self.pending_futures):
-                    if self.stop_event.is_set():
-                        with self.log_lock:
-                            logging.info("Retry operation stopped by user")
-                        break
-                    file_info = remaining_failed[self.pending_futures.index(future)]
-                    filename = file_info.get('title', 'unknown')
-                    try:
-                        path, failed_info = future.result()
-                        if path:
-                            downloaded_files.append(path)
-                            self.successful_downloads += 1
+            def worker_function(shutdown_event: threading.Event):
+                nonlocal current_failed
+                self.executor = ThreadPoolExecutor(max_workers=self.max_workers)
+                try:
+                    self.pending_futures = []
+                    for file_info in remaining_failed:
+                        filename = file_info.get('title', 'unknown')
+                        if shutdown_event.is_set():
                             with self.log_lock:
-                                logging.info(f"Successfully downloaded {filename} after retry")
-                        if failed_info:
-                            current_failed.append(failed_info)
+                                logging.info("Retry tasks stopped")
+                            return
                         with self.log_lock:
-                            logging.info(f"Progress: {self.successful_downloads}/{total_files} files (Failed: {len(current_failed)})")
-                    except Exception as e:
-                        with self.log_lock:
-                            logging.error(f"Unexpected error retrying {filename}: {e}")
-                        current_failed.append(file_info)
-            finally:
-                if self.stop_event.is_set():
-                    self.shutdown()
+                            logging.info(f"Retrying {filename} (Round {retry_round})")
+
+                        updated_file_info = self.query_handler.fetch_specific_file(file_info, self.timeout)
+                        if not updated_file_info:
+                            with self.log_lock:
+                                logging.error(f"Could not find updated metadata for {filename}, skipping retry")
+                            current_failed.append(file_info)
+                            continue
+
+                        future = self.executor.submit(self.download_file, updated_file_info)
+                        self.pending_futures.append(future)
+
+                    for future in as_completed(self.pending_futures):
+                        if shutdown_event.is_set():
+                            with self.log_lock:
+                                logging.info("Retry tasks stopped")
+                            return
+                        file_info = remaining_failed[self.pending_futures.index(future)]
+                        filename = file_info.get('title', 'unknown')
+                        try:
+                            path, failed_info = future.result()
+                            if path:
+                                downloaded_files.append(path)
+                                self.successful_downloads += 1
+                                with self.log_lock:
+                                    logging.info(f"Successfully downloaded {filename} after retry")
+                            if failed_info:
+                                current_failed.append(failed_info)
+                            with self.log_lock:
+                                logging.info(f"Progress: {self.successful_downloads}/{total_files} files (Failed: {len(current_failed)})")
+                        except Exception as e:
+                            with self.log_lock:
+                                logging.error(f"Unexpected error retrying {filename}: {e}")
+                            current_failed.append(file_info)
+                finally:
+                    self.executor.shutdown(wait=True)
+                    self.executor = None
+                    self.pending_futures = []
+
+            self.thread_manager.add_worker(worker_function, f"CMIP6_Retry_Worker_{retry_round}")
+
+            while self.thread_manager.is_running() and not self.thread_manager.is_shutdown():
+                time.sleep(0.1)
 
             remaining_failed = current_failed
 
@@ -507,10 +526,17 @@ def parse_file_time_range(filename: str) -> Tuple[Optional[str], Optional[str]]:
         return None, None
 
 def run_download(args) -> None:
+    thread_manager = ThreadManager(verbose=False, shutdown_event=args.stop_event)
+    args.stop_event = thread_manager.shutdown_event
     try:
         logging.debug("Starting run_download")
         prefix = ""
-        metadata_prefix = f"gridflow_{args.project.lower()}_"
+        metadata_prefix = f"gridflow_{args.project.lower()}_" if args.project else "gridflow_"
+
+        # Check for stop event early
+        if hasattr(args, 'stop_event') and args.stop_event.is_set():
+            logging.info("Download stopped before starting")
+            return
 
         if args.retry_failed:
             retry_file_path = Path(args.retry_failed)
@@ -573,8 +599,12 @@ def run_download(args) -> None:
                 logging.error("No valid search parameters provided")
                 sys.exit(1)
 
-            query_handler = QueryHandler(stop_event=getattr(args, 'stop_event', None))
+            query_handler = QueryHandler()
             files = query_handler.fetch_datasets(params, args.timeout)
+            # Check for stop event after querying
+            if hasattr(args, 'stop_event') and args.stop_event.is_set():
+                logging.info("Download stopped after querying datasets")
+                return
             if not files:
                 logging.error("No files found matching the query")
                 sys.exit(1)
@@ -590,6 +620,10 @@ def run_download(args) -> None:
         file_manager = FileManager(args.output_dir, args.metadata_dir, args.save_mode, prefix, metadata_prefix)
         if not args.retry_failed:
             file_manager.save_metadata(files, "query_results.json")
+        # Check for stop event after saving metadata
+        if hasattr(args, 'stop_event') and args.stop_event.is_set():
+            logging.info("Download stopped after saving metadata")
+            return
         if args.dry_run:
             logging.info(f"Dry run: Would download {len(files)} files")
             sys.exit(0)
@@ -607,14 +641,18 @@ def run_download(args) -> None:
         )
         try:
             downloaded, failed = downloader.download_all(files, phase="initial")
-            if failed:
+            if failed and not (hasattr(args, 'stop_event') and args.stop_event.is_set()):
                 file_manager.save_metadata(failed, "failed_downloads.json")
+                # Check for stop event before retrying
+                if hasattr(args, 'stop_event') and args.stop_event.is_set():
+                    logging.info("Download stopped before retrying failed files")
+                    return
                 logging.info(f"Retrying {len(failed)} failed downloads")
                 retry_downloaded, retry_failed = downloader.retry_failed(failed)
                 downloaded.extend(retry_downloaded)
                 if retry_failed:
                     file_manager.save_metadata(retry_failed, "failed_downloads_final.json")
-                    logging.error(f"{len(retry_failed)} downloads failed after retries.")
+                    logging.error(f"{len(retry_failed)} downloads failed after retries")
                 else:
                     logging.info("All retries completed successfully")
             logging.info(f"Completed: {downloader.successful_downloads}/{len(files)} files downloaded successfully")
@@ -623,3 +661,52 @@ def run_download(args) -> None:
     except Exception as e:
         logging.critical(f"Unexpected error in run_download: {e}")
         raise
+
+
+# import argparse
+
+# def main():
+#     parser = argparse.ArgumentParser(description="CMIP6 Data Downloader")
+#     parser.add_argument('--demo', action='store_true', help="Run in demo mode to download sample CMIP6 tas files")
+#     parser.add_argument('--output-dir', default="/tmp/downloads", help="Directory to save downloaded files (default: /tmp/downloads)")
+#     parser.add_argument('--metadata-dir', default="/tmp/metadata", help="Directory to save metadata files (default: /tmp/metadata)")
+#     parser.add_argument('--save-mode', default="flat", choices=["flat", "hierarchical"], help="File organization mode (default: flat)")
+#     parser.add_argument('--workers', type=int, default=2, help="Number of download workers (default: 2)")
+#     parser.add_argument('--retries', type=int, default=2, help="Number of retry attempts for failed downloads (default: 2)")
+#     parser.add_argument('--timeout', type=int, default=5, help="Timeout for HTTP requests in seconds (default: 5)")
+#     parser.add_argument('--max-downloads', type=int, default=10, help="Maximum number of files to download (default: 10)")
+#     parser.add_argument('--username', help="ESGF username for authentication")
+#     parser.add_argument('--password', help="ESGF password for authentication")
+#     parser.add_argument('--no-verify-ssl', action='store_true', help="Disable SSL verification")
+#     parser.add_argument('--openid', help="ESGF OpenID for authentication")
+#     parser.add_argument('--retry-failed', help="Path to JSON file with failed downloads to retry")
+#     parser.add_argument('--config', help="Path to configuration JSON file")
+#     parser.add_argument('--project', default="CMIP6", help="Project name (default: CMIP6)")
+#     parser.add_argument('--variable', help="Variable ID (e.g., tas)")
+#     parser.add_argument('--model', help="Model/source ID (e.g., CanESM5)")
+#     parser.add_argument('--activity', help="Activity ID (e.g., ScenarioMIP)")
+#     parser.add_argument('--experiment', help="Experiment ID (e.g., ssp585)")
+#     parser.add_argument('--frequency', help="Frequency (e.g., mon)")
+#     parser.add_argument('--ensemble', help="Ensemble/variant label (e.g., r1i1p1f1)")
+#     parser.add_argument('--institution', help="Institution ID")
+#     parser.add_argument('--source-type', help="Source type")
+#     parser.add_argument('--grid-label', help="Grid label")
+#     parser.add_argument('--resolution', help="Nominal resolution (e.g., 250 km)")
+#     parser.add_argument('--latest', action='store_true', help="Download latest versions only")
+#     parser.add_argument('--extra-params', help="Additional query parameters as JSON string")
+#     parser.add_argument('--dry-run', action='store_true', help="Perform a dry run without downloading")
+#     parser.add_argument('--test', action='store_true', help="Run in test mode (similar to demo)")
+
+#     args = parser.parse_args()
+
+#     # Set up logging
+#     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+#     try:
+#         run_download(args)
+#     except Exception as e:
+#         logging.critical(f"Demo failed: {e}")
+#         sys.exit(1)
+
+# if __name__ == '__main__':
+#     main()

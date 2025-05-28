@@ -16,8 +16,9 @@
 import sys
 import argparse
 import logging
-import signal
 from pathlib import Path
+from threading import Event
+from .thread_stopper import ThreadManager
 from .logging_utils import setup_logging
 from .cmip6_downloader import run_download as cmip6_run_download
 from .cmip5_downloader import run_download as cmip5_run_download
@@ -28,7 +29,8 @@ from .catalog_generator import generate_catalog
 
 def setup_backend_logging(args, project_prefix: str) -> None:
     if not any(isinstance(h, logging.FileHandler) for h in logging.getLogger().handlers):
-        log_dir = Path(args.metadata_dir if hasattr(args, 'metadata_dir') else 'logs')
+        md = getattr(args, 'metadata_dir', None)
+        log_dir = Path(md) if md else Path('logs')
         try:
             log_dir.mkdir(parents=True, exist_ok=True)
         except Exception as e:
@@ -36,102 +38,181 @@ def setup_backend_logging(args, project_prefix: str) -> None:
             sys.exit(1)
         setup_logging(log_dir, args.log_level, prefix=f"gridflow_{project_prefix}_")
 
-class StopFlag:
-    def __init__(self, stop_flag=None):
-        self._stopped = False
-        self._external_stop_flag = stop_flag
-
-    def __call__(self) -> bool:
-        if self._external_stop_flag and self._external_stop_flag():
-            return True
-        return self._stopped
-
-    def stop(self):
-        self._stopped = True
-
 def download_command(args):
-    setup_backend_logging(args, project_prefix="cmip6")
-    args.stop_flag = StopFlag()
-    cmip6_run_download(args)
+    if not hasattr(args, 'stop_event'):
+        args.stop_event = Event()
+    thread_manager = ThreadManager(verbose=False, shutdown_event=args.stop_event)
+    try:
+        setup_backend_logging(args, project_prefix="cmip6")
+        if args.demo:
+            args.project = "CMIP6"
+            args.experiment = "ssp585"
+            args.variable = "tas"
+            args.frequency = "Amon"
+            args.model = "AWI-CM-1-1-MR,TaiESM1"
+            args.ensemble = "r1i1p1f1"
+            args.grid_label = "gn"
+            args.start_date = "2015-01"
+            args.end_date = "2023-12"
+            args.workers = 4
+            args.max_downloads = 10
+            args.output_dir = "./cmip6_data"
+            args.metadata_dir = "./metadata"
+            args.log_level = "normal"
+        args.verbose = not hasattr(args, 'gui_mode') or not args.gui_mode
+        args.stop_event = thread_manager.shutdown_event
+        cmip6_run_download(args)
+    finally:
+        thread_manager.stop()
 
 def download_cmip5_command(args):
-    setup_backend_logging(args, project_prefix="cmip5")
-    args.stop_flag = StopFlag()
-    if hasattr(args, 'time_frequency'):
-        args.frequency = args.time_frequency
-    cmip5_run_download(args)
+    if not hasattr(args, 'stop_event'):
+        args.stop_event = Event()
+    thread_manager = ThreadManager(verbose=False, shutdown_event=args.stop_event)
+    try:
+        setup_backend_logging(args, project_prefix="cmip5")
+        if args.demo:
+            args.project = "CMIP5"
+            args.experiment = "historical"
+            args.variable = "tas"
+            args.frequency = "mon"
+            args.model = "CCSM4"
+            args.ensemble = "r1i1p1"
+            args.start_date = "1980-01"
+            args.end_date = "2005-12"
+            args.workers = 4
+            args.max_downloads = 10
+            args.output_dir = "./cmip5_data"
+            args.metadata_dir = "./metadata"
+            args.log_level = "normal"
+        if hasattr(args, 'time_frequency'):
+            args.frequency = args.time_frequency
+        args.verbose = not hasattr(args, 'gui_mode') or not args.gui_mode
+        args.stop_event = thread_manager.shutdown_event
+        cmip5_run_download(args)
+    finally:
+        thread_manager.stop()
 
 def download_prism_command(args):
-    setup_backend_logging(args, project_prefix="prism")
-    args.stop_flag = StopFlag()
-    if args.demo:
-        args.variable = "tmean"
-        args.resolution = "4km"
-        args.time_step = "monthly"
-        args.start_date = "2020-01"
-        args.end_date = "2020-03"
-        args.workers = 4
-    download_prism(
-        variable=args.variable,
-        resolution=args.resolution,
-        time_step=args.time_step,
-        start_date=args.start_date,
-        end_date=args.end_date,
-        output_dir=args.output_dir,
-        metadata_dir=args.metadata_dir,
-        log_level=args.log_level,
-        retries=args.retries,
-        timeout=args.timeout,
-        demo=args.demo,
-        workers=args.workers,
-        stop_flag=args.stop_flag
-    )
+    if not hasattr(args, 'stop_event'):
+        args.stop_event = Event()
+    thread_manager = ThreadManager(verbose=False, shutdown_event=args.stop_event)
+    try:
+        setup_backend_logging(args, project_prefix="prism")
+        if args.demo:
+            args.variable = "tmean"
+            args.resolution = "4km"
+            args.time_step = "monthly"
+            args.start_date = "2020-01"
+            args.end_date = "2020-03"
+            args.workers = 4
+            args.output_dir = "./prism_data"
+            args.metadata_dir = "./metadata"
+            args.log_level = "minimal"  # Align with test expectation
+        args.verbose = not hasattr(args, 'gui_mode') or not args.gui_mode
+        args.stop_event = thread_manager.shutdown_event
+        download_prism(
+            variable=args.variable,
+            resolution=args.resolution,
+            time_step=args.time_step,
+            start_date=args.start_date,
+            end_date=args.end_date,
+            output_dir=str(args.output_dir),  # Convert Path to string
+            metadata_dir=str(args.metadata_dir),  # Convert Path to string
+            log_level=args.log_level,
+            retries=getattr(args, 'retries', 3),
+            timeout=getattr(args, 'timeout', 30),
+            demo=args.demo,
+            workers=args.workers
+        )
+    finally:
+        thread_manager.stop()
 
 def crop_command(args):
-    setup_backend_logging(args, project_prefix="crop")
-    args.stop_flag = StopFlag()
-    if not args.demo and any(arg is None for arg in [args.min_lat, args.max_lat, args.min_lon, args.max_lon]):
-        logging.error("All spatial bounds (--min-lat, --max-lat, --min-lon, --max-lon) must be provided unless --demo")
-        sys.exit(1)
-    crop_netcdf(
-        input_dir=args.input_dir,
-        output_dir=args.output_dir,
-        min_lat=args.min_lat,
-        max_lat=args.max_lat,
-        min_lon=args.min_lon,
-        max_lon=args.max_lon,
-        buffer_km=args.buffer_km,
-        stop_flag=args.stop_flag,
-        workers=args.workers,
-        demo=args.demo
-    )
+    if not hasattr(args, 'stop_event'):
+        args.stop_event = Event()
+    thread_manager = ThreadManager(verbose=False, shutdown_event=args.stop_event)
+    try:
+        setup_backend_logging(args, project_prefix="crop")
+        if args.demo:
+            args.min_lat = 40.0
+            args.max_lat = 45.0
+            args.min_lon = -100.0
+            args.max_lon = -90.0
+            args.buffer_km = 0.0
+            args.workers = 4
+            args.output_dir = "./cropped_data"
+            args.input_dir = "./cmip6_data"
+            args.log_level = "normal"
+        if not args.demo and any(arg is None for arg in [args.min_lat, args.max_lat, args.min_lon, args.max_lon]):
+            logging.error("All spatial bounds (--min-lat, --max-lat, --min-lon, --max-lon) must be provided unless --demo")
+            sys.exit(1)
+        args.verbose = not hasattr(args, 'gui_mode') or not args.gui_mode
+        args.stop_event = thread_manager.shutdown_event
+        crop_netcdf(
+            input_dir=args.input_dir,
+            output_dir=args.output_dir,
+            min_lat=args.min_lat,
+            max_lat=args.max_lat,
+            min_lon=args.min_lon,
+            max_lon=args.max_lon,
+            buffer_km=args.buffer_km,
+            workers=args.workers,
+            demo=args.demo
+        )
+    finally:
+        thread_manager.stop()
 
 def clip_command(args):
-    setup_backend_logging(args, project_prefix="clip")
-    args.stop_flag = StopFlag()
-    shapefile_path = getattr(args, "shapefile_path", None)
-    clip_netcdf(
-        input_dir=args.input_dir,
-        shapefile_path=shapefile_path,
-        buffer_km=args.buffer_km,
-        output_dir=args.output_dir,
-        stop_flag=args.stop_flag,
-        workers=args.workers
-    )
+    if not hasattr(args, 'stop_event'):
+        args.stop_event = Event()
+    thread_manager = ThreadManager(verbose=False, shutdown_event=args.stop_event)
+    try:
+        setup_backend_logging(args, project_prefix="clip")
+        if args.demo:
+            args.shapefile_path = "./iowa_border/iowa_border.shp"
+            args.buffer_km = 20.0
+            args.workers = 4
+            args.output_dir = "./clipped_data"
+            args.input_dir = "./cmip6_data"
+            args.log_level = "normal"
+        shapefile_path = getattr(args, "shapefile_path", None)
+        args.verbose = not hasattr(args, 'gui_mode') or not args.gui_mode
+        args.stop_event = thread_manager.shutdown_event
+        clip_netcdf(
+            input_dir=args.input_dir,
+            shapefile_path=shapefile_path,
+            output_dir=args.output_dir,
+            workers=args.workers,
+            buffer_km=args.buffer_km
+        )
+    finally:
+        thread_manager.stop()
 
 def catalog_command(args):
-    setup_backend_logging(args, project_prefix="catalog")
-    args.stop_flag = StopFlag()
-    result = generate_catalog(
-        input_dir=args.input_dir,
-        output_dir=args.output_dir,
-        demo_mode=args.demo,
-        workers=args.workers,
-        stop_flag=args.stop_flag
-    )
-    if not result and args.demo:
-        logging.info("Catalog generation failed in demo mode, exiting")
-        sys.exit(0)
+    if not hasattr(args, 'stop_event'):
+        args.stop_event = Event()
+    thread_manager = ThreadManager(verbose=False, shutdown_event=args.stop_event)
+    try:
+        setup_backend_logging(args, project_prefix="catalog")
+        if args.demo:
+            args.workers = 4
+            args.output_dir = "./catalog"
+            args.input_dir = "./cmip6_data"
+            args.log_level = "normal"
+        args.verbose = not hasattr(args, 'gui_mode') or not args.gui_mode
+        args.stop_event = thread_manager.shutdown_event
+        result = generate_catalog(
+            input_dir=args.input_dir,
+            output_dir=args.output_dir,
+            demo_mode=args.demo,
+            workers=args.workers
+        )
+        if not result and args.demo:
+            logging.info("Catalog generation failed in demo mode, exiting")
+            sys.exit(0)
+    finally:
+        thread_manager.stop()
 
 def main():
     parser = argparse.ArgumentParser(description="GridFlow Command Line Interface")
@@ -165,6 +246,7 @@ def main():
     download_parser.add_argument('--username', help="ESGF username")
     download_parser.add_argument('--password', help="ESGF password")
     download_parser.add_argument('--no-verify-ssl', action='store_true')
+    download_parser.add_argument('--demo', action='store_true', help='Run in demo mode with sample CMIP6 download')
 
     # Download CMIP5
     cmip5_parser = subparsers.add_parser('download-cmip5', help='Download CMIP5 data')
@@ -189,6 +271,7 @@ def main():
     cmip5_parser.add_argument('--username', help="ESGF username")
     cmip5_parser.add_argument('--password', help="ESGF password")
     cmip5_parser.add_argument('--no-verify-ssl', action='store_true')
+    cmip5_parser.add_argument('--demo', action='store_true', help='Run in demo mode with sample CMIP5 download')
 
     # Download PRISM
     prism_parser = subparsers.add_parser('download-prism', help='Download PRISM data')
@@ -221,11 +304,12 @@ def main():
     # Clip
     clip_parser = subparsers.add_parser('clip', help='Clip NetCDF files by shapefile')
     clip_parser.add_argument('--input-dir', default='./cmip6_data', help='Input directory with NetCDF files')
-    clip_parser.add_argument('--shapefile-path', default='../iowa_border/iowa_border.shp', help='Path to shapefile for clipping')
+    clip_parser.add_argument('--shapefile-path', default='./iowa_border/iowa_border.shp', help='Path to shapefile for clipping')
     clip_parser.add_argument('--buffer-km', type=float, default=20, help='Buffer distance in kilometers')
     clip_parser.add_argument('--output-dir', default='./clipped_data', help='Output directory for clipped files')
     clip_parser.add_argument('--log-level', default='minimal', choices=['minimal', 'normal', 'verbose', 'debug'])
     clip_parser.add_argument('--workers', type=int)
+    clip_parser.add_argument('--demo', action='store_true', help='Run in demo mode with sample shapefile')
 
     # Catalog
     catalog_parser = subparsers.add_parser('catalog', help='Generate catalog from NetCDF files')

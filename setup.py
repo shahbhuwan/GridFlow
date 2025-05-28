@@ -43,6 +43,7 @@ setup(
         "netCDF4>=1.6.0,<2.0",
         "numpy>=1.25.0,<2.0",
         "geopandas>=0.10.0,<1.0",
+        "fiona>=1.8.0,<2.0",  # Added
         "PyQt5>=5.15.9,<6.0",
         "python-dateutil>=2.8.0,<3.0",
         "shapely>=1.7.1,<2.0",
@@ -66,7 +67,7 @@ setup(
     ],
     entry_points={
         "console_scripts": [
-            "gridflow = gridflow_entry:main",
+            "gridflow = gridflow.entry:main",  # Changed from gridflow_entry to gridflow.entry
         ],
-    },
+    }
 )

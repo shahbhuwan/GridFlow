@@ -1,716 +1,718 @@
-import logging
+import unittest
 import json
-import pytest
+import logging
 import requests
 from pathlib import Path
-from unittest.mock import patch, MagicMock
-from threading import Event
-from gridflow.cmip6_downloader import FileManager, QueryHandler, Downloader, load_config, parse_file_time_range, run_download, InterruptibleSession
+from threading import Lock
+from unittest.mock import patch, Mock, MagicMock
+from concurrent.futures import ThreadPoolExecutor
+from gridflow.cmip6_downloader import FileManager, QueryHandler, Downloader, load_config, parse_file_time_range, run_download
+import sys
 
-# Fixture to reset logging before each test
-@pytest.fixture(autouse=True)
-def reset_logging():
-    logger = logging.getLogger()
-    logger.handlers = []
-    logger.setLevel(logging.NOTSET)
-    yield
-    logger.handlers = []  # Ensure cleanup after each test
+class TestDownloader(unittest.TestCase):
+    def setUp(self):
+        self.download_dir = "/tmp/downloads"
+        self.metadata_dir = "/tmp/metadata"
+        self.file_manager = FileManager(self.download_dir, self.metadata_dir, "flat", prefix="test_", metadata_prefix="meta_")
+        self.query_handler = QueryHandler()
+        self.downloader = Downloader(
+            self.file_manager, max_workers=2, retries=2, timeout=5, max_downloads=10,
+            username="test_user", password="test_pass", verify_ssl=True
+        )
+        logging.getLogger().setLevel(logging.CRITICAL)  # Suppress logging during tests
 
-@pytest.fixture
-def sample_output_dir(tmp_path):
-    output_dir = tmp_path / "cmip6_data"
-    output_dir.mkdir(parents=True, exist_ok=True)
-    return output_dir
+    def tearDown(self):
+        self.downloader.shutdown()
 
-@pytest.fixture
-def sample_metadata_dir(tmp_path):
-    metadata_dir = tmp_path / "metadata"
-    metadata_dir.mkdir(parents=True, exist_ok=True)
-    return metadata_dir
+    @patch('pathlib.Path.mkdir')
+    def test_file_manager_init(self, mock_mkdir):
+        fm = FileManager("/test/downloads", "/test/metadata", "flat")
+        mock_mkdir.assert_called()
+        self.assertEqual(fm.download_dir, Path("/test/downloads"))
+        self.assertEqual(fm.metadata_dir, Path("/test/metadata"))
+        self.assertEqual(fm.save_mode, "flat")
 
-@pytest.fixture
-def file_info():
-    return {
-        "id": "file1",
-        "title": "tas_Amon_CMCC-ESM2_ssp585_r1i1p1f1_gn_201501-210012.nc",
-        "activity_id": ["ScenarioMIP"],
-        "nominal_resolution": ["100km"],
-        "variable_id": ["tas"],
-        "source_id": ["CMCC-ESM2"],
-        "experiment_id": ["ssp585"],
-        "frequency": ["mon"],
-        "variant_label": ["r1i1p1f1"],
-        "url": ["http://example.com/tas.nc|HTTPServer"],
-        "checksum": ["e7d87b738825c33824cf3fd32b7314161fc8c425129163ff5e7260fc7288da36"],
-        "checksum_type": ["sha256"]
-    }
+    @patch('pathlib.Path.mkdir')
+    def test_file_manager_init_failure(self, mock_mkdir):
+        mock_mkdir.side_effect = PermissionError("Access denied")
+        with self.assertRaises(SystemExit):
+            FileManager("/test/downloads", "/test/metadata", "flat")
 
-@pytest.fixture
-def stop_event():
-    return Event()
-
-def test_file_manager_init_directory_creation(sample_output_dir, sample_metadata_dir):
-    file_manager = FileManager(str(sample_output_dir), str(sample_metadata_dir), "flat", "test_")
-    assert sample_output_dir.exists()
-    assert sample_metadata_dir.exists()
-
-def test_file_manager_init_directory_failure(sample_output_dir, sample_metadata_dir, caplog):
-    with patch("pathlib.Path.mkdir", side_effect=OSError("Permission denied")):
-        with caplog.at_level(logging.ERROR):
-            with pytest.raises(SystemExit):
-                FileManager(str(sample_output_dir), str(sample_metadata_dir), "flat")
-            assert "Failed to create directories" in caplog.text
-
-def test_file_manager_get_output_path_flat(sample_output_dir, sample_metadata_dir, file_info):
-    file_manager = FileManager(str(sample_output_dir), str(sample_metadata_dir), "flat", "test_")
-    output_path = file_manager.get_output_path(file_info)
-    expected = sample_output_dir / "test_ScenarioMIP_100km_tas_Amon_CMCC-ESM2_ssp585_r1i1p1f1_gn_201501-210012.nc"
-    assert output_path == expected
-
-def test_file_manager_get_output_path_structured(sample_output_dir, sample_metadata_dir, file_info):
-    file_manager = FileManager(str(sample_output_dir), str(sample_metadata_dir), "structured", "test_")
-    output_path = file_manager.get_output_path(file_info)
-    expected = sample_output_dir / "tas" / "100km" / "ScenarioMIP" / "tas_Amon_CMCC-ESM2_ssp585_r1i1p1f1_gn_201501-210012.nc"
-    assert output_path == expected
-
-def test_file_manager_get_output_path_resolution_fallback(sample_output_dir, sample_metadata_dir, file_info):
-    file_info_modified = file_info.copy()
-    file_info_modified["nominal_resolution"] = [""]
-    file_info_modified["source_id"] = ["CanESM5"]
-    file_manager = FileManager(str(sample_output_dir), str(sample_metadata_dir), "flat", "test_")
-    output_path = file_manager.get_output_path(file_info_modified)
-    expected = sample_output_dir / "test_ScenarioMIP_250km_tas_Amon_CanESM5_ssp585_r1i1p1f1_gn_201501-210012.nc"
-    assert output_path == expected
-
-def test_file_manager_get_output_path_missing_info(sample_output_dir, sample_metadata_dir):
-    file_manager = FileManager(str(sample_output_dir), str(sample_metadata_dir), "flat", "test_")
-    file_info = {"title": "tas.nc"}
-    output_path = file_manager.get_output_path(file_info)
-    expected = sample_output_dir / "test_unknown_unknown_tas.nc"
-    assert output_path == expected
-
-def test_file_manager_save_metadata(sample_output_dir, sample_metadata_dir):
-    file_manager = FileManager(str(sample_output_dir), str(sample_metadata_dir), "flat", metadata_prefix="gridflow_cmip6_")
-    files = [{"title": "tas.nc"}]
-    file_manager.save_metadata(files, "results.json")
-    metadata_path = sample_metadata_dir / "gridflow_cmip6_results.json"
-    assert metadata_path.exists()
-    with open(metadata_path, "r") as f:
-        assert json.load(f) == files
-
-def test_file_manager_save_metadata_failure(sample_output_dir, sample_metadata_dir, caplog):
-    file_manager = FileManager(str(sample_output_dir), str(sample_metadata_dir), "flat")
-    with patch("builtins.open", side_effect=OSError("Write error")):
-        with caplog.at_level(logging.ERROR):
-            file_manager.save_metadata([{"title": "tas.nc"}], "results.json")
-            assert "Failed to save metadata" in caplog.text
-
-def test_query_handler_build_query():
-    query_handler = QueryHandler()
-    params = {"project": "CMIP6", "variable_id": "tas", "experiment_id": "ssp585"}
-    query = query_handler.build_query("https://example.com/search", params)
-    assert "type=File" in query
-    assert "project=CMIP6" in query
-    assert "variable_id=tas" in query
-    assert "experiment_id=ssp585" in query
-    assert "format=application%2Fsolr%2Bjson" in query
-    assert "limit=1000" in query
-    assert "distrib=true" in query
-
-def test_query_handler_fetch_datasets_success(file_info, stop_event):
-    query_handler = QueryHandler(nodes=["https://example.com/search"], stop_event=stop_event)
-    params = {"project": "CMIP6", "variable_id": "tas"}
-    mock_response = {
-        "response": {
-            "docs": [file_info, {**file_info, "id": "file2", "title": "pr.nc"}],
-            "numFound": 2
+    def test_file_manager_get_output_path_flat(self):
+        file_info = {
+            'title': 'test_file.nc',
+            'activity_id': ['ScenarioMIP'],
+            'variable_id': ['tas'],
+            'source_id': ['CanESM5'],
+            'nominal_resolution': ['250 km']
         }
-    }
-    with patch.object(query_handler.session, "get") as mock_get:
-        mock_get.return_value = MagicMock(status_code=200, json=lambda: mock_response)
-        files = query_handler.fetch_datasets(params, timeout=10)
-        assert len(files) == 2
-        assert files[0]["id"] == "file1"
-        assert files[1]["id"] == "file2"
-        mock_get.assert_called()
+        path = self.file_manager.get_output_path(file_info)
+        expected = Path(self.download_dir) / "test_ScenarioMIP_250km_test_file.nc"
+        self.assertEqual(path, expected)
 
-def test_query_handler_fetch_datasets_pagination(file_info, stop_event):
-    query_handler = QueryHandler(nodes=["https://example.com/search"], stop_event=stop_event)
-    params = {"project": "CMIP6"}
-    mock_responses = [
-        {"response": {"docs": [file_info], "numFound": 2}},
-        {"response": {"docs": [{**file_info, "id": "file2", "title": "pr.nc"}], "numFound": 2}}
-    ]
-    with patch.object(query_handler.session, "get") as mock_get:
-        mock_get.side_effect = [
-            MagicMock(status_code=200, json=lambda: mock_responses[0]),
-            MagicMock(status_code=200, json=lambda: mock_responses[1])
-        ]
-        files = query_handler.fetch_datasets(params, timeout=10)
-        assert len(files) == 2
-        assert files[0]["id"] == "file1"
-        assert files[1]["id"] == "file2"
-        assert mock_get.call_count == 2
+    @patch('pathlib.Path.mkdir')
+    def test_file_manager_get_output_path_hierarchical(self, mock_mkdir):
+        fm = FileManager(self.download_dir, self.metadata_dir, "hierarchical")
+        file_info = {
+            'title': 'test_file.nc',
+            'activity_id': ['ScenarioMIP'],
+            'variable_id': ['tas'],
+            'source_id': ['CanESM5'],
+            'nominal_resolution': ['250 km']
+        }
+        path = fm.get_output_path(file_info)
+        expected = Path(self.download_dir) / "tas/250km/ScenarioMIP/test_file.nc"
+        self.assertEqual(path, expected)
+        mock_mkdir.assert_called()
 
-def test_query_handler_fetch_datasets_empty_response(stop_event, caplog):
-    query_handler = QueryHandler(nodes=["https://example.com/search"], stop_event=stop_event)
-    params = {"project": "CMIP6"}
-    mock_response = {"response": {"docs": [], "numFound": 0}}
-    with patch.object(query_handler.session, "get") as mock_get:
-        mock_get.return_value = MagicMock(status_code=200, json=lambda: mock_response)
-        with caplog.at_level(logging.ERROR):
-            with pytest.raises(SystemExit):
-                query_handler.fetch_datasets(params, timeout=10)
-            assert "All nodes failed to respond or no files were found" in caplog.text
+    @patch('builtins.open', new_callable=MagicMock)
+    def test_file_manager_save_metadata(self, mock_open):
+        files = [{'title': 'test_file.nc'}]
+        self.file_manager.save_metadata(files, "test_metadata.json")
+        mock_open.assert_called_with(Path(self.metadata_dir) / "meta_test_metadata.json", 'w', encoding='utf-8')
+        mock_open().__enter__().write.assert_called()
 
-def test_query_handler_fetch_datasets_auth_error(stop_event, caplog):
-    query_handler = QueryHandler(nodes=["https://example.com/search"], stop_event=stop_event)
-    params = {"project": "CMIP6"}
-    mock_response = MagicMock(status_code=401)
-    mock_response.raise_for_status.side_effect = requests.exceptions.HTTPError("401 Unauthorized")
-    with patch.object(query_handler.session, "get", return_value=mock_response):
-        with caplog.at_level(logging.ERROR):
-            with pytest.raises(SystemExit):
-                query_handler.fetch_datasets(params, timeout=10)
-            assert "Failed to connect to https://example.com/search" in caplog.text
+    @patch('builtins.open', new_callable=MagicMock)
+    def test_file_manager_save_metadata_failure(self, mock_open):
+        mock_open.side_effect = IOError("Write error")
+        files = [{'title': 'test_file.nc'}]
+        with self.assertLogs(level='ERROR'):
+            self.file_manager.save_metadata(files, "test_metadata.json")
 
-def test_query_handler_fetch_datasets_multiple_nodes(file_info, stop_event):
-    query_handler = QueryHandler(nodes=["https://node1.com/search", "https://node2.com/search"], stop_event=stop_event)
-    params = {"project": "CMIP6"}
-    mock_response = {"response": {"docs": [file_info], "numFound": 1}}
-    with patch.object(query_handler.session, "get") as mock_get:
-        mock_get.return_value = MagicMock(status_code=200, json=lambda: mock_response)
-        files = query_handler.fetch_datasets(params, timeout=10)
-        assert len(files) == 1
-        assert files[0]["id"] == "file1"
-        assert mock_get.call_count == 1  # Should stop after first successful node
+    def test_query_handler_build_query(self):
+        params = {'variable_id': 'tas', 'source_id': 'CanESM5'}
+        url = self.query_handler.build_query("https://test-node/esg-search/search", params)
+        expected = ("https://test-node/esg-search/search?type=File&project=CMIP6&format=application/solr%2Bjson"
+                    "&limit=1000&distrib=true&variable_id=tas&source_id=CanESM5")
+        self.assertEqual(url, expected)
 
-def test_query_handler_fetch_specific_file(file_info, stop_event):
-    query_handler = QueryHandler(nodes=["https://example.com/search"], stop_event=stop_event)
-    mock_response = {"response": {"docs": [file_info], "numFound": 1}}
-    with patch.object(query_handler.session, "get") as mock_get:
-        mock_get.return_value = MagicMock(status_code=200, json=lambda: mock_response)
-        result = query_handler.fetch_specific_file(file_info, timeout=10)
-        assert result == file_info
-        mock_get.assert_called()
-
-def test_query_handler_fetch_specific_file_not_found(file_info, stop_event, caplog):
-    query_handler = QueryHandler(nodes=["https://example.com/search"], stop_event=stop_event)
-    mock_response = {"response": {"docs": [], "numFound": 0}}
-    with patch.object(query_handler.session, "get") as mock_get:
-        mock_get.return_value = MagicMock(status_code=200, json=lambda: mock_response)
-        with caplog.at_level(logging.ERROR):
-            result = query_handler.fetch_specific_file(file_info, timeout=10)
-            assert result is None
-            assert "Failed to find file tas_Amon_CMCC-ESM2_ssp585_r1i1p1f1_gn_201501-210012.nc at any node" in caplog.text
-
-def test_interruptible_session_stop_event(stop_event):
-    session = InterruptibleSession(stop_event)
-    stop_event.set()
-    with pytest.raises(requests.exceptions.RequestException, match="Download interrupted by user"):
-        session.get("http://example.com/tas.nc")
-
-def test_downloader_init_authentication(file_info, sample_output_dir, sample_metadata_dir, caplog):
-    file_manager = FileManager(str(sample_output_dir), str(sample_metadata_dir), "flat")
-    with caplog.at_level(logging.WARNING):
-        downloader = Downloader(file_manager, max_workers=1, retries=1, timeout=10, max_downloads=None, username="user", password="pass", verify_ssl=True)
-        assert downloader.session.auth == ("user", "pass")
-        assert "Using basic authentication" in caplog.text
-    caplog.clear()
-    with caplog.at_level(logging.WARNING):
-        downloader = Downloader(file_manager, max_workers=1, retries=1, timeout=10, max_downloads=None, username=None, password=None, verify_ssl=True)
-        assert downloader.session.auth is None
-        assert "No authentication credentials provided" in caplog.text
-
-def test_downloader_verify_checksum_sha256(sample_output_dir, file_info):
-    file_manager = FileManager(str(sample_output_dir), str(sample_output_dir), "flat")
-    downloader = Downloader(file_manager, max_workers=1, retries=1, timeout=10, max_downloads=None, username=None, password=None, verify_ssl=True)
-    file_path = sample_output_dir / "tas.nc"
-    with open(file_path, "wb") as f:
-        f.write(b"test_data")
-    assert downloader.verify_checksum(file_path, file_info) is True
-
-def test_downloader_verify_checksum_md5(sample_output_dir, file_info):
-    file_manager = FileManager(str(sample_output_dir), str(sample_output_dir), "flat")
-    downloader = Downloader(file_manager, max_workers=1, retries=1, timeout=10, max_downloads=None, username=None, password=None, verify_ssl=True)
-    file_path = sample_output_dir / "tas.nc"
-    with open(file_path, "wb") as f:
-        f.write(b"test_data")
-    file_info["checksum"] = ["6af8307c2460f2d208ad254f04be4b0d"]
-    file_info["checksum_type"] = ["md5"]
-    assert downloader.verify_checksum(file_path, file_info) is True
-
-def test_downloader_verify_checksum_unsupported(sample_output_dir, file_info, caplog):
-    file_manager = FileManager(str(sample_output_dir), str(sample_output_dir), "flat")
-    downloader = Downloader(file_manager, max_workers=1, retries=1, timeout=10, max_downloads=None, username=None, password=None, verify_ssl=True)
-    file_path = sample_output_dir / "tas.nc"
-    with open(file_path, "wb") as f:
-        f.write(b"test_data")
-    file_info["checksum_type"] = ["unknown"]
-    with caplog.at_level(logging.WARNING):
-        assert downloader.verify_checksum(file_path, file_info) is True
-        assert "Unsupported checksum type unknown" in caplog.text
-
-def test_downloader_verify_checksum_failure(sample_output_dir, file_info, caplog):
-    file_manager = FileManager(str(sample_output_dir), str(sample_output_dir), "flat")
-    downloader = Downloader(file_manager, max_workers=1, retries=1, timeout=10, max_downloads=None, username=None, password=None, verify_ssl=True)
-    file_path = sample_output_dir / "tas.nc"
-    with open(file_path, "wb") as f:
-        f.write(b"test_data")
-    file_info["checksum"] = ["wrong_checksum"]
-    with caplog.at_level(logging.ERROR):
-        assert downloader.verify_checksum(file_path, file_info) is False
-        assert "Checksum mismatch" in caplog.text
-
-def test_downloader_download_file_success(sample_output_dir, file_info, stop_event):
-    file_manager = FileManager(str(sample_output_dir), str(sample_output_dir), "flat")
-    downloader = Downloader(file_manager, max_workers=1, retries=1, timeout=10, max_downloads=None, username=None, password=None, verify_ssl=True)
-    output_path = sample_output_dir / "ScenarioMIP_100km_tas_Amon_CMCC-ESM2_ssp585_r1i1p1f1_gn_201501-210012.nc"
-    with patch.object(downloader.session, "get") as mock_get:
-        mock_response = MagicMock(status_code=200)
-        mock_response.iter_content.return_value = [b"test_data"]
+    @patch('requests.Session.get')
+    def test_query_handler_fetch_datasets(self, mock_get):
+        mock_response = Mock()
+        mock_response.json.return_value = {
+            'response': {'docs': [{'id': 'file1', 'title': 'test_file.nc'}], 'numFound': 1}
+        }
+        mock_response.raise_for_status.return_value = None
         mock_get.return_value = mock_response
-        path, failed_info = downloader.download_file(file_info)
-        assert path == str(output_path)
-        assert failed_info is None
-        assert output_path.exists()
+        params = {'variable_id': 'tas'}
+        files = self.query_handler.fetch_datasets(params, timeout=5)
+        self.assertEqual(len(files), 1)
+        self.assertEqual(files[0]['title'], 'test_file.nc')
 
-def test_downloader_download_file_existing_valid(sample_output_dir, file_info, stop_event, caplog):
-    file_manager = FileManager(str(sample_output_dir), str(sample_output_dir), "flat")
-    downloader = Downloader(file_manager, max_workers=1, retries=1, timeout=10, max_downloads=None, username=None, password=None, verify_ssl=True)
-    output_path = sample_output_dir / "ScenarioMIP_100km_tas_Amon_CMCC-ESM2_ssp585_r1i1p1f1_gn_201501-210012.nc"
-    with open(output_path, "wb") as f:
-        f.write(b"test_data")
-    with caplog.at_level(logging.INFO):
-        path, failed_info = downloader.download_file(file_info)
-        assert path == str(output_path)
-        assert failed_info is None
-        assert "already exists" in caplog.text
+    @patch('requests.Session.get')
+    def test_query_handler_fetch_datasets_node_failure(self, mock_get):
+        mock_get.side_effect = requests.RequestException("Connection error")
+        with self.assertLogs(level='ERROR'):
+            files = self.query_handler.fetch_datasets({'variable_id': 'tas'}, timeout=5)
+        self.assertEqual(files, [])
 
-def test_downloader_download_file_network_error(sample_output_dir, file_info, stop_event, caplog):
-    file_manager = FileManager(str(sample_output_dir), str(sample_output_dir), "flat")
-    downloader = Downloader(file_manager, max_workers=1, retries=1, timeout=10, max_downloads=None, username=None, password=None, verify_ssl=True)
-    with patch.object(downloader.session, "get", side_effect=requests.exceptions.RequestException("Network error")):
-        with caplog.at_level(logging.ERROR):
-            path, failed_info = downloader.download_file(file_info)
-            assert path is None
-            assert failed_info == file_info
-            assert "Failed to download tas_Amon_CMCC-ESM2_ssp585_r1i1p1f1_gn_201501-210012.nc after 1 attempts" in caplog.text
+    @patch('requests.Session.get')
+    def test_query_handler_fetch_specific_file(self, mock_get):
+        mock_response = Mock()
+        mock_response.json.return_value = {
+            'response': {'docs': [{'title': 'test_file.nc'}], 'numFound': 1}
+        }
+        mock_response.raise_for_status.return_value = None
+        mock_get.return_value = mock_response
+        file_info = {'title': 'test_file.nc', 'variable_id': ['tas'], 'source_id': ['CanESM5']}
+        result = self.query_handler.fetch_specific_file(file_info, timeout=5)
+        self.assertEqual(result['title'], 'test_file.nc')
 
-def test_downloader_download_file_retries(sample_output_dir, file_info, stop_event):
-    file_manager = FileManager(str(sample_output_dir), str(sample_output_dir), "flat")
-    downloader = Downloader(file_manager, max_workers=1, retries=2, timeout=10, max_downloads=None, username=None, password=None, verify_ssl=True)
-    output_path = sample_output_dir / "ScenarioMIP_100km_tas_Amon_CMCC-ESM2_ssp585_r1i1p1f1_gn_201501-210012.nc"
-    with patch.object(downloader.session, "get") as mock_get, patch("time.sleep") as mock_sleep:
-        mock_get.side_effect = [
-            requests.exceptions.RequestException("Failed"),
-            MagicMock(status_code=200, iter_content=lambda chunk_size: [b"test_data"])
-        ]
-        path, failed_info = downloader.download_file(file_info)
-        assert path == str(output_path)
-        assert failed_info is None
-        assert output_path.exists()
-        assert mock_get.call_count == 2
-        mock_sleep.assert_called_with(7)  # 2^1 + 5
+    def test_downloader_init_with_auth(self):
+        downloader = Downloader(self.file_manager, 2, 2, 5, 10, "user", "pass", True)
+        self.assertEqual(downloader.session.auth, ("user", "pass"))
+        self.assertEqual(downloader.max_workers, 2)
+        self.assertEqual(downloader.retries, 2)
 
-def test_downloader_download_file_invalid_url(sample_output_dir, file_info, stop_event, caplog):
-    file_manager = FileManager(str(sample_output_dir), str(sample_output_dir), "flat")
-    downloader = Downloader(file_manager, max_workers=1, retries=1, timeout=10, max_downloads=None, username=None, password=None, verify_ssl=True)
-    file_info["url"] = ["invalid://url|HTTPServer"]
-    with patch.object(downloader.session, "get", side_effect=requests.exceptions.InvalidURL("Invalid URL")):
-        with caplog.at_level(logging.ERROR):
-            path, failed_info = downloader.download_file(file_info)
-            assert path is None
-            assert failed_info == file_info
-            assert "Failed to download tas_Amon_CMCC-ESM2_ssp585_r1i1p1f1_gn_201501-210012.nc after 1 attempts" in caplog.text
+    @patch('requests.Session.get')
+    @patch('pathlib.Path.open')
+    @patch('pathlib.Path.exists')
+    @patch('pathlib.Path.unlink')
+    @patch('pathlib.Path.rename')
+    def test_downloader_download_file_success(self, mock_rename, mock_unlink, mock_exists, mock_open, mock_get):
+        mock_response = Mock()
+        mock_response.iter_content.return_value = [b'data']
+        mock_response.raise_for_status.return_value = None
+        mock_get.return_value = mock_response
+        mock_exists.return_value = True
+        mock_file = Mock()
+        mock_file.write.side_effect = lambda chunk: None
+        mock_file.read.return_value = b'data'
+        mock_open.side_effect = [mock_file, mock_file]
+        file_info = {
+            'title': 'test_file.nc',
+            'url': ['https://test.com/file|HTTPServer'],
+            'checksum': ['a1b2c3'],
+            'checksum_type': ['sha256'],
+            'activity_id': ['ScenarioMIP'],
+            'variable_id': ['tas'],
+            'source_id': ['CanESM5'],
+            'nominal_resolution': ['250 km']
+        }
+        with patch('hashlib.sha256') as mock_sha256:
+            mock_sha256_obj = Mock()
+            mock_sha256_obj.update = Mock()
+            mock_sha256_obj.hexdigest.return_value = 'a1b2c3'
+            mock_sha256.return_value = mock_sha256_obj
+            path, failed = self.downloader.download_file(file_info)
 
-def test_downloader_download_file_missing_info(sample_output_dir, stop_event, caplog):
-    file_manager = FileManager(str(sample_output_dir), str(sample_output_dir), "flat")
-    downloader = Downloader(file_manager, max_workers=1, retries=1, timeout=10, max_downloads=None, username=None, password=None, verify_ssl=True)
-    file_info = {"title": "", "url": []}
-    with caplog.at_level(logging.ERROR):
-        path, failed_info = downloader.download_file(file_info)
-        assert path is None
-        assert failed_info == file_info
-        assert "Invalid file info: missing URLs or title" in caplog.text
+        expected_path = str(Path(self.download_dir) / "test_ScenarioMIP_250km_test_file.nc")
+        self.assertEqual(path, expected_path)
+        self.assertIsNone(failed)
+        mock_get.assert_called_with('https://test.com/file', stream=True, verify=True, timeout=(5, 1))
+        mock_sha256_obj.update.assert_called_with(b'data')
+        mock_rename.assert_called()
 
-def test_downloader_download_file_stop_event(sample_output_dir, file_info, stop_event, caplog):
-    file_manager = FileManager(str(sample_output_dir), str(sample_output_dir), "flat")
-    downloader = Downloader(file_manager, max_workers=1, retries=1, timeout=10, max_downloads=None, username=None, password=None, verify_ssl=True)
-    stop_event.set()
-    with caplog.at_level(logging.INFO):
-        path, failed_info = downloader.download_file(file_info)
-        assert path is None
-        assert failed_info == file_info
-        assert "Skipping download of tas_Amon_CMCC-ESM2_ssp585_r1i1p1f1_gn_201501-210012.nc due to stop event" in caplog.text
+    @patch('requests.Session.get')
+    @patch('pathlib.Path.open')
+    @patch('pathlib.Path.exists')
+    @patch('pathlib.Path.unlink')
+    def test_downloader_download_file_checksum_mismatch(self, mock_unlink, mock_exists, mock_open, mock_get):
+        mock_response = Mock()
+        mock_response.iter_content.return_value = [b'data']
+        mock_response.raise_for_status.return_value = None
+        mock_get.return_value = mock_response
+        mock_exists.return_value = False
+        mock_file = Mock()
+        mock_file.write.side_effect = lambda chunk: None
+        mock_file.read.return_value = b'data'
+        mock_open.side_effect = [mock_file, mock_file]
+        file_info = {
+            'title': 'test_file.nc',
+            'url': ['https://test.com/file|HTTPServer'],
+            'checksum': ['a1b2c3'],
+            'checksum_type': ['sha256'],
+            'activity_id': ['ScenarioMIP'],
+            'variable_id': ['tas'],
+            'source_id': ['CanESM5'],
+            'nominal_resolution': ['250 km']
+        }
+        with patch('hashlib.sha256') as mock_sha256:
+            mock_sha256_obj = Mock()
+            mock_sha256_obj.update = Mock()
+            mock_sha256_obj.hexdigest.return_value = 'wrong'
+            mock_sha256.return_value = mock_sha256_obj
+            path, failed = self.downloader.download_file(file_info)
 
-def test_downloader_download_all(sample_output_dir, file_info, stop_event):
-    file_manager = FileManager(str(sample_output_dir), str(sample_output_dir), "flat")
-    downloader = Downloader(file_manager, max_workers=1, retries=1, timeout=10, max_downloads=2, username=None, password=None, verify_ssl=True)
-    files = [file_info, {**file_info, "id": "file2", "title": "pr.nc", "url": ["http://example.com/pr.nc|HTTPServer"]}]
-    with patch.object(downloader, "download_file") as mock_download:
-        mock_download.side_effect = [
-            (str(sample_output_dir / "ScenarioMIP_100km_tas_Amon_CMCC-ESM2_ssp585_r1i1p1f1_gn_201501-210012.nc"), None),
-            (str(sample_output_dir / "ScenarioMIP_100km_pr.nc"), None)
-        ]
-        downloaded, failed = downloader.download_all(files, phase="test")
-        assert len(downloaded) == 2
-        assert len(failed) == 0
-        assert downloaded == [
-            str(sample_output_dir / "ScenarioMIP_100km_tas_Amon_CMCC-ESM2_ssp585_r1i1p1f1_gn_201501-210012.nc"),
-            str(sample_output_dir / "ScenarioMIP_100km_pr.nc")
-        ]
+        self.assertIsNone(path)
+        self.assertEqual(failed, file_info)
+        mock_get.assert_called_with('https://test.com/file', stream=True, verify=True, timeout=(5, 1))
+        mock_sha256_obj.update.assert_called_with(b'data')
+        mock_unlink.assert_called()
 
-def test_downloader_download_all_partial_failure(sample_output_dir, file_info, stop_event, caplog):
-    file_manager = FileManager(str(sample_output_dir), str(sample_output_dir), "flat")
-    downloader = Downloader(file_manager, max_workers=1, retries=1, timeout=10, max_downloads=2, username=None, password=None, verify_ssl=True)
-    files = [file_info, {**file_info, "id": "file2", "title": "pr.nc", "url": ["http://example.com/pr.nc|HTTPServer"]}]
-    with patch.object(downloader, "download_file") as mock_download:
-        mock_download.side_effect = [
-            (str(sample_output_dir / "ScenarioMIP_100km_tas_Amon_CMCC-ESM2_ssp585_r1i1p1f1_gn_201501-210012.nc"), None),
-            (None, files[1])
-        ]
-        with caplog.at_level(logging.INFO):
-            downloaded, failed = downloader.download_all(files, phase="test")
-            assert len(downloaded) == 1
-            assert len(failed) == 1
-            assert downloaded == [str(sample_output_dir / "ScenarioMIP_100km_tas_Amon_CMCC-ESM2_ssp585_r1i1p1f1_gn_201501-210012.nc")]
-            assert failed == [files[1]]
-            assert "Progress: 1/2 files (Failed: 1)" in caplog.text
 
-def test_downloader_download_all_stop_event(sample_output_dir, file_info, stop_event, caplog):
-    file_manager = FileManager(str(sample_output_dir), str(sample_output_dir), "flat")
-    downloader = Downloader(file_manager, max_workers=1, retries=1, timeout=10, max_downloads=None, username=None, password=None, verify_ssl=True)
-    stop_event.set()
-    files = [file_info]
-    with caplog.at_level(logging.INFO):
-        downloaded, failed = downloader.download_all(files, phase="test")
-        assert len(downloaded) == 0
-        assert len(failed) == 0
-        assert "Download operation stopped by user" in caplog.text
+    @patch('concurrent.futures.as_completed')
+    @patch('concurrent.futures.ThreadPoolExecutor')
+    def test_downloader_download_all(self, mock_executor, mock_as_completed):
+        mock_future = Mock()
+        mock_future.result.return_value = ("path/to/file.nc", None)
+        mock_executor.return_value.__enter__.return_value.submit.side_effect = [mock_future]
+        mock_as_completed.return_value = [mock_future]
+        files = [{
+            'title': 'test_file.nc',
+            'url': ['https://test.com/file|HTTPServer'],
+            'activity_id': ['ScenarioMIP'],
+            'variable_id': ['tas'],
+            'source_id': ['CanESM5'],
+            'nominal_resolution': ['250 km']
+        }]
+        with patch.object(self.downloader, 'download_file', return_value=("path/to/file.nc", None)) as mock_download_file:
+            downloaded, failed = self.downloader.download_all(files)
+        self.assertEqual(len(downloaded), 1)
+        self.assertEqual(len(failed), 0)
+        self.assertEqual(self.downloader.successful_downloads, 1)
+        mock_download_file.assert_called_once_with(files[0])
 
-def test_downloader_retry_failed_success(sample_output_dir, file_info, stop_event):
-    file_manager = FileManager(str(sample_output_dir), str(sample_output_dir), "flat")
-    downloader = Downloader(file_manager, max_workers=1, retries=1, timeout=10, max_downloads=None, username=None, password=None, verify_ssl=True)
-    files = [file_info]
-    with patch.object(downloader.query_handler, "fetch_specific_file", return_value=file_info), \
-         patch.object(downloader, "download_file", return_value=(str(sample_output_dir / "ScenarioMIP_100km_tas_Amon_CMCC-ESM2_ssp585_r1i1p1f1_gn_201501-210012.nc"), None)):
-        downloaded, failed = downloader.retry_failed(files)
-        assert len(downloaded) == 1
-        assert len(failed) == 0
-        assert downloaded == [str(sample_output_dir / "ScenarioMIP_100km_tas_Amon_CMCC-ESM2_ssp585_r1i1p1f1_gn_201501-210012.nc")]
+    @patch('concurrent.futures.as_completed')
+    @patch('concurrent.futures.ThreadPoolExecutor')
+    @patch.object(QueryHandler, 'fetch_specific_file')
+    def test_downloader_retry_failed(self, mock_fetch, mock_executor, mock_as_completed):
+        mock_future = Mock()
+        mock_future.result.return_value = ("path/to/file.nc", None)
+        mock_executor.return_value.__enter__.return_value.submit.side_effect = [mock_future]
+        mock_as_completed.return_value = [mock_future]
+        mock_fetch.return_value = {
+            'title': 'test_file.nc',
+            'url': ['https://test.com/file|HTTPServer'],
+            'activity_id': ['ScenarioMIP'],
+            'variable_id': ['tas'],
+            'source_id': ['CanESM5'],
+            'nominal_resolution': ['250 km']
+        }
+        failed_files = [{'title': 'test_file.nc'}]
+        with patch.object(self.downloader, 'download_file', return_value=("path/to/file.nc", None)) as mock_download_file:
+            downloaded, failed = self.downloader.retry_failed(failed_files)
+        self.assertEqual(len(downloaded), 1)
+        self.assertEqual(len(failed), 0)
+        mock_download_file.assert_called()
 
-def test_downloader_retry_failed_not_found(sample_output_dir, file_info, stop_event, caplog):
-    file_manager = FileManager(str(sample_output_dir), str(sample_output_dir), "flat")
-    downloader = Downloader(file_manager, max_workers=1, retries=1, timeout=10, max_downloads=None, username=None, password=None, verify_ssl=True)
-    files = [file_info]
-    with patch.object(downloader.query_handler, "fetch_specific_file", return_value=None):
-        with caplog.at_level(logging.ERROR):
-            downloaded, failed = downloader.retry_failed(files)
-            assert len(downloaded) == 0
-            assert len(failed) == 1
-            assert failed == [file_info]
-            assert "Could not find updated metadata for tas_Amon_CMCC-ESM2_ssp585_r1i1p1f1_gn_201501-210012.nc" in caplog.text
+    @patch('builtins.open', new_callable=MagicMock)
+    def test_load_config(self, mock_open):
+        mock_open().__enter__.return_value.read.return_value = '{"project": "CMIP6"}'
+        config = load_config("config.json")
+        self.assertEqual(config, {"project": "CMIP6"})
 
-def test_downloader_retry_failed_stop_event(sample_output_dir, file_info, stop_event, caplog):
-    file_manager = FileManager(str(sample_output_dir), str(sample_output_dir), "flat")
-    downloader = Downloader(file_manager, max_workers=1, retries=1, timeout=10, max_downloads=None, username=None, password=None, verify_ssl=True)
-    stop_event.set()
-    files = [file_info]
-    with caplog.at_level(logging.INFO):
-        downloaded, failed = downloader.retry_failed(files)
-        assert len(downloaded) == 0
-        assert len(failed) == 1
-        assert failed == [file_info]
-        assert "Retry operation stopped by user" in caplog.text
+    @patch('builtins.open', new_callable=MagicMock)
+    def test_load_config_failure(self, mock_open):
+        mock_open.side_effect = FileNotFoundError
+        with self.assertRaises(SystemExit):
+            load_config("nonexistent.json")
 
-def test_downloader_shutdown(sample_output_dir, file_info, stop_event):
-    file_manager = FileManager(str(sample_output_dir), str(sample_output_dir), "flat")
-    downloader = Downloader(file_manager, max_workers=1, retries=1, timeout=10, max_downloads=None, username=None, password=None, verify_ssl=True)
-    downloader.executor = MagicMock()
-    downloader.pending_futures = [MagicMock()]
-    downloader.shutdown()
-    assert downloader.stop_event.is_set()
-    downloader.executor.shutdown.assert_called_with(wait=False)
-    assert downloader.pending_futures == []
+    def test_parse_file_time_range(self):
+        filename = "tas_day_CanESM5_ssp585_r1i1p1f1_20200101-20201231.nc"
+        start, end = parse_file_time_range(filename)
+        self.assertEqual(start, "2020-01-01")
+        self.assertEqual(end, "2020-12-31")
 
-def test_load_config_valid(tmp_path):
-    config_path = tmp_path / "config.json"
-    config_data = {"project": "CMIP6", "variable_id": "tas"}
-    with open(config_path, "w") as f:
-        json.dump(config_data, f)
-    config = load_config(str(config_path))
-    assert config == config_data
+    def test_parse_file_time_range_invalid(self):
+        filename = "tas_day_CanESM5_ssp585_r1i1p1f1_invalid.nc"
+        start, end = parse_file_time_range(filename)
+        self.assertIsNone(start)
+        self.assertIsNone(end)
 
-def test_load_config_invalid(tmp_path, caplog):
-    config_path = tmp_path / "config.json"
-    with open(config_path, "w") as f:
-        f.write("invalid json")
-    with caplog.at_level(logging.ERROR):
-        with pytest.raises(SystemExit):
-            load_config(str(config_path))
-        assert "Failed to load config file" in caplog.text
+    @patch('gridflow.cmip6_downloader.load_config')
+    @patch('gridflow.cmip6_downloader.QueryHandler')
+    @patch('gridflow.cmip6_downloader.FileManager')
+    @patch('gridflow.cmip6_downloader.Downloader')
+    def test_run_download(self, mock_downloader, mock_file_manager, mock_query_handler, mock_load_config):
+        mock_args = Mock(
+            retry_failed=None, config=None, project="CMIP6", activity=None, experiment=None,
+            frequency=None, variable="tas", model=None, ensemble=None, institution=None,
+            source_type=None, grid_label=None, resolution=None, latest=False,
+            extra_params=None, demo=False, test=False, output_dir="/tmp/downloads",
+            metadata_dir="/tmp/metadata", save_mode="flat", workers=2, retries=2,
+            timeout=5, max_downloads=10, id=None, password=None, no_verify_ssl=False,
+            openid=None, dry_run=False
+        )
+        mock_query_handler.return_value.fetch_datasets.return_value = [{'title': 'test_file.nc'}]
+        mock_downloader.return_value.download_all.return_value = (["path/to/file.nc"], [])
+        
+        run_download(mock_args)
+        
+        mock_query_handler.return_value.fetch_datasets.assert_called()
+        mock_file_manager.return_value.save_metadata.assert_called_with([{'title': 'test_file.nc'}], "query_results.json")
+        mock_downloader.return_value.download_all.assert_called_with([{'title': 'test_file.nc'}], phase="initial")
+        mock_downloader.return_value.shutdown.assert_called()
 
-def test_parse_file_time_range_valid():
-    filename = "tas_Amon_CMCC-ESM2_ssp585_r1i1p1f1_gn_201501-210012.nc"
-    start_date, end_date = parse_file_time_range(filename)
-    assert start_date == "2015-01-01"
-    assert end_date == "2100-12-01"
+    @patch('gridflow.cmip6_downloader.load_config')
+    @patch('gridflow.cmip6_downloader.QueryHandler')
+    @patch('gridflow.cmip6_downloader.FileManager')
+    @patch('gridflow.cmip6_downloader.Downloader')
+    def test_run_download_no_params(self, mock_downloader, mock_file_manager, mock_query_handler, mock_load_config):
+        mock_args = Mock(
+            retry_failed=None, config=None, project=None, activity=None, experiment=None,
+            frequency=None, variable=None, model=None, ensemble=None, institution=None,
+            source_type=None, grid_label=None, resolution=None, latest=False,
+            extra_params=None, demo=False, test=False, output_dir="/tmp/downloads",
+            metadata_dir="/tmp/metadata", save_mode="flat", workers=2, retries=2,
+            timeout=5, max_downloads=10, id=None, password=None, no_verify_ssl=False,
+            openid=None, dry_run=False
+        )
+        with self.assertRaises(SystemExit) as cm:
+            run_download(mock_args)
+        self.assertEqual(cm.exception.code, 1)
 
-def test_parse_file_time_range_invalid(caplog):
-    filename = "tas_Amon_CMCC-ESM2_ssp585_r1i1p1f1_gn_invalid.nc"
-    with caplog.at_level(logging.DEBUG):
-        start_date, end_date = parse_file_time_range(filename)
-        assert start_date is None
-        assert end_date is None
-        assert "Failed to parse time range" in caplog.text
+    @patch('pathlib.Path.exists')
+    @patch('pathlib.Path.is_file')
+    @patch('builtins.open', new_callable=MagicMock)
+    @patch('gridflow.cmip6_downloader.FileManager')
+    @patch('gridflow.cmip6_downloader.Downloader')
+    def test_run_download_retry_failed(self, mock_downloader, mock_file_manager, mock_open, mock_is_file, mock_exists):
+        mock_args = Mock(
+            retry_failed="failed.json",
+            output_dir="/tmp/downloads",
+            metadata_dir="/tmp/metadata",
+            save_mode="flat",
+            workers=2,
+            retries=2,
+            timeout=5,
+            max_downloads=10,
+            id=None,
+            password=None,
+            no_verify_ssl=False,
+            openid=None,
+            project="CMIP6",
+            dry_run=False
+        )
+        mock_exists.return_value = True
+        mock_is_file.return_value = True
+        mock_open().__enter__.return_value.read.return_value = json.dumps([{'title': 'test_file.nc'}])
+        mock_downloader.return_value.download_all.return_value = ([], [{'title': 'test_file.nc'}])
+        mock_downloader.return_value.retry_failed.return_value = ([], [{'title': 'test_file.nc'}])
 
-def test_run_download_demo_mode(sample_output_dir, sample_metadata_dir, file_info):
-    args = MagicMock()
-    args.demo = True
-    args.output_dir = str(sample_output_dir)
-    args.metadata_dir = str(sample_metadata_dir)
-    args.log_dir = str(sample_output_dir / "logs")
-    args.log_level = "minimal"
-    args.save_mode = "flat"
-    args.workers = 4
-    args.retries = 5
-    args.timeout = 30
-    args.max_downloads = 10
-    args.id = None
-    args.password = None
-    args.no_verify_ssl = False
-    args.retry_failed = None
-    args.config = None
-    args.dry_run = False
-    args.openid = None
-    args.project = "CMIP6"
-    args.activity = "ScenarioMIP"
-    args.experiment = "ssp585"
-    args.frequency = "mon"
-    args.variable = "tas"
-    args.model = "CMCC-ESM2"
-    args.ensemble = "r1i1p1f1"
-    args.institution = None
-    args.source_type = None
-    args.grid_label = None
-    args.resolution = "100km"
-    args.latest = False
-    args.extra_params = None
-    args.stop_event = None
+        run_download(mock_args)
 
-    with patch("gridflow.cmip6_downloader.QueryHandler.fetch_datasets", return_value=[file_info]), \
-         patch("gridflow.cmip6_downloader.Downloader.download_all", return_value=([str(sample_output_dir / "ScenarioMIP_100km_tas_Amon_CMCC-ESM2_ssp585_r1i1p1f1_gn_201501-210012.nc")], [])), \
-         patch("gridflow.cmip6_downloader.FileManager.save_metadata") as mock_save:
-        run_download(args)
-        mock_save.assert_called_with([file_info], "query_results.json")
+        mock_open.assert_called_with(Path("failed.json"), 'r', encoding='utf-8')
+        mock_file_manager.return_value.save_metadata.assert_any_call([{'title': 'test_file.nc'}], "failed_downloads.json")
+        mock_file_manager.return_value.save_metadata.assert_any_call([{'title': 'test_file.nc'}], "failed_downloads_final.json")
+        mock_downloader.return_value.retry_failed.assert_called_with([{'title': 'test_file.nc'}])
+        mock_downloader.return_value.shutdown.assert_called()
 
-def test_run_download_dry_run(sample_output_dir, sample_metadata_dir, file_info, caplog):
-    args = MagicMock()
-    args.dry_run = True
-    args.output_dir = str(sample_output_dir)
-    args.metadata_dir = str(sample_metadata_dir)
-    args.log_dir = str(sample_output_dir / "logs")
-    args.log_level = "minimal"
-    args.save_mode = "flat"
-    args.workers = 4
-    args.retries = 5
-    args.timeout = 30
-    args.max_downloads = None
-    args.id = None
-    args.password = None
-    args.no_verify_ssl = False
-    args.retry_failed = None
-    args.config = None
-    args.demo = False
-    args.project = "CMIP6"
-    args.activity = "ScenarioMIP"
-    args.experiment = "ssp585"
-    args.frequency = "mon"
-    args.variable = "tas"
-    args.model = None
-    args.ensemble = None
-    args.institution = None
-    args.source_type = None
-    args.grid_label = None
-    args.resolution = None
-    args.latest = False
-    args.extra_params = None
-    args.stop_event = None
+    @patch('pathlib.Path.exists')
+    @patch('pathlib.Path.is_file')
+    @patch('builtins.open', new_callable=MagicMock)
+    @patch('gridflow.cmip6_downloader.FileManager')
+    @patch('gridflow.cmip6_downloader.Downloader')
+    def test_run_download_retry_failed_with_failures(self, mock_downloader, mock_file_manager, mock_open, mock_is_file, mock_exists):
+        mock_args = Mock(
+            retry_failed="failed.json",
+            output_dir="/tmp/downloads",
+            metadata_dir="/tmp/metadata",
+            save_mode="flat",
+            workers=2,
+            retries=2,
+            timeout=5,
+            max_downloads=10,
+            id=None,
+            password=None,
+            no_verify_ssl=False,
+            openid=None,
+            project="CMIP6",
+            dry_run=False
+        )
+        mock_exists.return_value = True
+        mock_is_file.return_value = True
+        mock_open().__enter__.return_value.read.return_value = json.dumps([{'title': 'test_file.nc'}])
+        mock_downloader.return_value.download_all.return_value = ([], [{'title': 'test_file.nc'}])
+        mock_downloader.return_value.retry_failed.return_value = ([], [{'title': 'test_file.nc'}])
 
-    with patch("gridflow.cmip6_downloader.QueryHandler.fetch_datasets", return_value=[file_info]), \
-         patch("gridflow.cmip6_downloader.FileManager.save_metadata") as mock_save:
-        with caplog.at_level(logging.INFO):
-            with pytest.raises(SystemExit):
-                run_download(args)
-            assert "Dry run: Would download 1 files" in caplog.text
-            mock_save.assert_called_with([file_info], "query_results.json")
+        run_download(mock_args)
 
-def test_run_download_retry_failed_success(sample_output_dir, sample_metadata_dir, file_info):
-    failed_file = sample_metadata_dir / "failed_downloads.json"
-    failed_data = [file_info]
-    with open(failed_file, "w") as f:
-        json.dump(failed_data, f)
+        mock_open.assert_called_with(Path("failed.json"), 'r', encoding='utf-8')
+        mock_file_manager.return_value.save_metadata.assert_any_call([{'title': 'test_file.nc'}], "failed_downloads.json")
+        mock_file_manager.return_value.save_metadata.assert_any_call([{'title': 'test_file.nc'}], "failed_downloads_final.json")
+        mock_downloader.return_value.retry_failed.assert_called_with([{'title': 'test_file.nc'}])
+        mock_downloader.return_value.shutdown.assert_called()
 
-    args = MagicMock()
-    args.retry_failed = str(failed_file)
-    args.output_dir = str(sample_output_dir)
-    args.metadata_dir = str(sample_metadata_dir)
-    args.log_dir = str(sample_output_dir / "logs")
-    args.log_level = "minimal"
-    args.save_mode = "flat"
-    args.workers = 4
-    args.retries = 5
-    args.timeout = 30
-    args.max_downloads = None
-    args.id = None
-    args.password = None
-    args.no_verify_ssl = False
-    args.dry_run = False
-    args.demo = False
-    args.config = None
-    args.project = None
-    args.activity = None
-    args.experiment = None
-    args.frequency = None
-    args.variable = None
-    args.model = None
-    args.ensemble = None
-    args.institution = None
-    args.source_type = None
-    args.grid_label = None
-    args.resolution = None
-    args.latest = False
-    args.extra_params = None
-    args.stop_event = None
+    @patch('pathlib.Path.mkdir')
+    def test_file_manager_init_general_exception(self, mock_mkdir):
+        mock_mkdir.side_effect = Exception("Unexpected failure")
+        with self.assertRaises(SystemExit):
+            FileManager("/invalid_path", "/invalid_meta", "flat")
 
-    with patch("gridflow.cmip6_downloader.Downloader.download_all", return_value=([str(sample_output_dir / "ScenarioMIP_100km_tas_Amon_CMCC-ESM2_ssp585_r1i1p1f1_gn_201501-210012.nc")], [])), \
-         patch("gridflow.cmip6_downloader.FileManager.save_metadata") as mock_save:
-        run_download(args)
-        mock_save.assert_not_called()
+    @patch("requests.Session.get")
+    def test_query_handler_fetch_from_node_http_error(self, mock_get):
+        mock_get.side_effect = requests.RequestException("Boom")
+        handler = QueryHandler()
+        with self.assertRaises(requests.RequestException):
+            handler._fetch_from_node("https://fake-node", {}, 5)
 
-def test_run_download_retry_failed_with_failures(sample_output_dir, sample_metadata_dir, file_info):
-    failed_file = sample_metadata_dir / "failed_downloads.json"
-    failed_data = [
-        file_info,
-        {**file_info, "id": "file2", "title": "pr.nc", "url": ["http://example.com/pr.nc|HTTPServer"]}
-    ]
-    with open(failed_file, "w") as f:
-        json.dump(failed_data, f)
+    @patch("builtins.open", side_effect=IOError("File read error"))
+    def test_downloader_verify_checksum_file_open_error(self, mock_open):
+        file_info = {'checksum': ['123'], 'checksum_type': ['sha256']}
+        result = self.downloader.verify_checksum(Path("somefile.nc"), file_info)
+        self.assertFalse(result)
 
-    args = MagicMock()
-    args.retry_failed = str(failed_file)
-    args.output_dir = str(sample_output_dir)
-    args.metadata_dir = str(sample_metadata_dir)
-    args.log_dir = str(sample_output_dir / "logs")
-    args.log_level = "minimal"
-    args.save_mode = "flat"
-    args.workers = 4
-    args.retries = 5
-    args.timeout = 30
-    args.max_downloads = None
-    args.id = None
-    args.password = None
-    args.no_verify_ssl = False
-    args.dry_run = False
-    args.demo = False
-    args.config = None
-    args.project = None
-    args.activity = None
-    args.experiment = None
-    args.frequency = None
-    args.variable = None
-    args.model = None
-    args.ensemble = None
-    args.institution = None
-    args.source_type = None
-    args.grid_label = None
-    args.resolution = None
-    args.latest = False
-    args.extra_params = None
-    args.stop_event = None
+    def test_downloader_verify_checksum_unsupported_type(self):
+        with patch("builtins.open", mock_open := MagicMock()):
+            mock_open.return_value.__enter__.return_value.read.return_value = b"data"
+            file_info = {'checksum': ['123'], 'checksum_type': ['sha512']}
+            result = self.downloader.verify_checksum(Path("file.nc"), file_info)
+            self.assertTrue(result)  # Unsupported type gets skipped
 
-    with patch("gridflow.cmip6_downloader.Downloader.download_all", side_effect=[
-        ([str(sample_output_dir / "ScenarioMIP_100km_tas_Amon_CMCC-ESM2_ssp585_r1i1p1f1_gn_201501-210012.nc")], [failed_data[1]]),
-        ([], [failed_data[1]])
-    ]), \
-         patch("gridflow.cmip6_downloader.FileManager.save_metadata") as mock_save:
-        run_download(args)
-        mock_save.assert_called_with([failed_data[1]], "failed_downloads_final.json")
+    def test_downloader_download_file_invalid_url_format(self):
+        file_info = {'title': 'file.nc', 'url': ['ftp://invalid'], 'checksum': ['x'], 'checksum_type': ['sha256']}
+        path, failed = self.downloader.download_file(file_info)
+        self.assertIsNone(path)
+        self.assertEqual(failed, file_info)
 
-def test_run_download_no_files(sample_output_dir, sample_metadata_dir, caplog):
-    args = MagicMock()
-    args.project = "CMIP6"
-    args.output_dir = str(sample_output_dir)
-    args.metadata_dir = str(sample_metadata_dir)
-    args.log_dir = str(sample_output_dir / "logs")
-    args.log_level = "minimal"
-    args.save_mode = "flat"
-    args.workers = 4
-    args.retries = 5
-    args.timeout = 30
-    args.max_downloads = None
-    args.id = None
-    args.password = None
-    args.no_verify_ssl = False
-    args.retry_failed = None
-    args.config = None
-    args.dry_run = False
-    args.demo = False
-    args.activity = None
-    args.experiment = None
-    args.frequency = None
-    args.variable = None
-    args.model = None
-    args.ensemble = None
-    args.institution = None
-    args.source_type = None
-    args.grid_label = None
-    args.resolution = None
-    args.latest = False
-    args.extra_params = None
-    args.stop_event = None
+    def test_downloader_download_all_zero_files(self):
+        downloaded, failed = self.downloader.download_all([])
+        self.assertEqual(downloaded, [])
+        self.assertEqual(failed, [])
 
-    with patch("gridflow.cmip6_downloader.QueryHandler.fetch_datasets", return_value=[]):
-        with caplog.at_level(logging.ERROR):
-            with pytest.raises(SystemExit):
-                run_download(args)
-            assert "No files found matching the query" in caplog.text
+    @patch.object(QueryHandler, 'fetch_specific_file', return_value=None)
+    def test_downloader_retry_failed_missing_metadata(self, mock_fetch):
+        failed = [{'title': 'test_file.nc'}]
+        downloaded, still_failed = self.downloader.retry_failed(failed)
+        self.assertEqual(downloaded, [])
+        self.assertEqual(still_failed, failed)
 
-def test_run_download_invalid_retry_file(sample_output_dir, sample_metadata_dir, caplog):
-    args = MagicMock()
-    args.retry_failed = "nonexistent.json"
-    args.output_dir = str(sample_output_dir)
-    args.metadata_dir = str(sample_metadata_dir)
-    args.log_dir = str(sample_output_dir / "logs")
-    args.log_level = "minimal"
-    args.save_mode = "flat"
-    args.workers = 4
-    args.retries = 5
-    args.timeout = 30
-    args.max_downloads = None
-    args.id = None
-    args.password = None
-    args.no_verify_ssl = False
-    args.dry_run = False
-    args.demo = False
-    args.config = None
-    args.project = None
-    args.activity = None
-    args.experiment = None
-    args.frequency = None
-    args.variable = None
-    args.model = None
-    args.ensemble = None
-    args.institution = None
-    args.source_type = None
-    args.grid_label = None
-    args.resolution = None
-    args.latest = False
-    args.extra_params = None
-    args.stop_event = None
+    @patch.object(Downloader, 'download_file', side_effect=Exception("boom"))
+    def test_downloader_download_all_exception_during_future(self, mock_dl):
+        files = [{'title': 'x.nc', 'url': ['https://x.nc|HTTPServer']}]
+        downloaded, failed = self.downloader.download_all(files)
+        self.assertEqual(len(failed), 1)
 
-    with caplog.at_level(logging.ERROR):
-        with pytest.raises(SystemExit):
+    @patch.object(Downloader, 'verify_checksum', return_value=False)
+    @patch('requests.Session.get')
+    @patch('builtins.open', new_callable=unittest.mock.mock_open)
+    @patch('pathlib.Path.unlink')
+    @patch('time.sleep', return_value=None)
+    def test_downloader_download_file_checksum_retry_exceeded(self, mock_sleep, mock_unlink, mock_open, mock_get, mock_verify):
+        mock_response = Mock()
+        mock_response.iter_content.return_value = [b'data']
+        mock_response.raise_for_status.return_value = None
+        mock_get.return_value = mock_response
+
+        file_info = {
+            'title': 'file.nc',
+            'url': ['https://test.com/file.nc|HTTPServer'],
+            'checksum': ['bad'], 'checksum_type': ['sha256'],
+            'activity_id': ['ScenarioMIP'],
+            'variable_id': ['tas'],
+            'source_id': ['CanESM5'],
+            'nominal_resolution': ['250 km']
+        }
+        path, failed = self.downloader.download_file(file_info)
+        self.assertIsNone(path)
+        self.assertEqual(failed, file_info)
+
+    def setUp(self):
+        self.download_dir = "/tmp/downloads"
+        self.metadata_dir = "/tmp/metadata"
+        self.file_manager = FileManager(self.download_dir, self.metadata_dir, "flat", prefix="test_", metadata_prefix="meta_")
+        self.query_handler = QueryHandler()
+        self.downloader = Downloader(
+            self.file_manager, max_workers=2, retries=2, timeout=5, max_downloads=10,
+            username="test_user", password="test_pass", verify_ssl=True
+        )
+
+    @patch("builtins.open", new_callable=unittest.mock.mock_open, read_data='{"project": "CMIP6"}')
+    def test_load_config_valid(self, mock_open):
+        cfg = load_config("config.json")
+        self.assertEqual(cfg['project'], "CMIP6")
+
+    @patch("builtins.open", side_effect=FileNotFoundError("Not found"))
+    def test_load_config_missing_file(self, mock_open):
+        with self.assertRaises(SystemExit):
+            load_config("missing.json")
+
+    def test_parse_file_time_range_month_format(self):
+        s, e = parse_file_time_range("tas_mon_model_experiment_202201-202212.nc")
+        self.assertEqual(s, "2022-01-01")
+        self.assertEqual(e, "2022-12-01")
+
+    def test_parse_file_time_range_bad_format(self):
+        s, e = parse_file_time_range("invalid_file.nc")
+        self.assertIsNone(s)
+        self.assertIsNone(e)
+
+    @patch("builtins.open", new_callable=unittest.mock.mock_open, read_data=b"dummy")
+    def test_verify_checksum_md5_success(self, mock_open):
+        file_info = {'checksum': ['5d41402abc4b2a76b9719d911017c592'], 'checksum_type': ['md5']}
+        path = Path("dummy.txt")
+        with patch("hashlib.md5") as mock_md5:
+            md5obj = mock_md5.return_value
+            md5obj.hexdigest.return_value = '5d41402abc4b2a76b9719d911017c592'
+            md5obj.update = Mock()
+            result = self.downloader.verify_checksum(path, file_info)
+            self.assertTrue(result)
+
+    def test_download_file_invalid_metadata(self):
+        file_info = {"url": []}
+        path, failed = self.downloader.download_file(file_info)
+        self.assertIsNone(path)
+        self.assertIsNotNone(failed)
+
+    def test_retry_failed_no_files(self):
+        downloaded, failed = self.downloader.retry_failed([])
+        self.assertEqual(downloaded, [])
+        self.assertEqual(failed, [])
+
+    def test_query_handler_no_nodes(self):
+        qh = QueryHandler(nodes=[])
+        results = qh.fetch_datasets({}, timeout=2)
+        self.assertEqual(results, [])
+
+    def test_file_manager_output_path_unknown_resolution(self):
+        info = {'title': 'f.nc', 'activity_id': ['A'], 'variable_id': ['tas'], 'source_id': ['X']}
+        path = self.file_manager.get_output_path(info)
+        self.assertIn("unknown", str(path))
+
+    def test_file_manager_save_metadata_error(self):
+        with patch("builtins.open", side_effect=IOError("fail")):
+            self.file_manager.save_metadata([{"title": "f"}], "meta.json")
+
+    def test_file_manager_hierarchical_no_resolution(self):
+        fm = FileManager(self.download_dir, self.metadata_dir, "hierarchical")
+        info = {'title': 'f.nc', 'activity_id': ['A'], 'variable_id': ['tas'], 'source_id': ['X']}
+        out = fm.get_output_path(info)
+        self.assertTrue(out.name == "f.nc")
+
+    def setUp(self):
+        self.download_dir = "/tmp/downloads"
+        self.metadata_dir = "/tmp/metadata"
+        self.file_manager = FileManager(self.download_dir, self.metadata_dir, "flat", prefix="test_", metadata_prefix="meta_")
+        self.query_handler = QueryHandler()
+        self.downloader = Downloader(
+            self.file_manager, max_workers=2, retries=1, timeout=5, max_downloads=10,
+            username="test_user", password="test_pass", verify_ssl=True
+        )
+
+    def test_openid_warning(self):
+        with self.assertLogs(level="WARNING") as cm:
+            Downloader(self.file_manager, 2, 2, 5, 5, None, None, True, openid="test_openid")
+        self.assertTrue(any("OpenID provided" in msg for msg in cm.output))
+
+    def test_shutdown_executor_cleanup(self):
+        mock_executor = Mock()
+        self.downloader.executor = mock_executor
+        future = Mock()
+        self.downloader.pending_futures = [future]
+        self.downloader.shutdown()
+        # pending futures should be cancelled
+        future.cancel.assert_called()
+        # and the executor.shutdown(wait=False) should have been called
+        mock_executor.shutdown.assert_called_with(wait=False)
+
+    @patch("builtins.open", new_callable=unittest.mock.mock_open, read_data=b"corrupt")
+    def test_verify_checksum_mismatch(self, mock_open):
+        file_info = {"checksum": ["bad"], "checksum_type": ["sha256"]}
+        with patch("hashlib.sha256") as mock_sha:
+            mock_sha_obj = mock_sha.return_value
+            mock_sha_obj.hexdigest.return_value = "wrong"
+            mock_sha_obj.update = Mock()
+            result = self.downloader.verify_checksum(Path("dummy"), file_info)
+            self.assertFalse(result)
+
+    @patch("pathlib.Path.unlink", side_effect=OSError("unlink failed"))
+    def test_download_file_unlink_exception(self, mock_unlink):
+        file_info = {
+            'title': 'f.nc',
+            'url': ['https://test.com/f.nc|HTTPServer'],
+            'checksum': ['bad'], 'checksum_type': ['sha256']
+        }
+        with patch.object(self.downloader, "verify_checksum", return_value=False):
+            with patch("pathlib.Path.exists", return_value=True):
+                with self.assertLogs(level="ERROR") as cm:
+                    self.downloader.download_file(file_info)
+        self.assertTrue(any("Failed to remove existing file" in msg for msg in cm.output))
+
+    @patch("builtins.open", new_callable=unittest.mock.mock_open)
+    def test_download_file_write_chunk_none(self, mock_open):
+        file_info = {
+            'title': 'f.nc',
+            'url': ['https://test.com/f.nc|HTTPServer'],
+            'checksum': ['abc'], 'checksum_type': ['sha256']
+        }
+        response = Mock()
+        response.iter_content.return_value = [None]
+        response.raise_for_status.return_value = None
+        with patch("requests.Session.get", return_value=response):
+            with patch.object(self.downloader, "verify_checksum", return_value=True):
+                self.downloader.download_file(file_info)
+
+    def test_download_file_checksum_fail_all_retries(self):
+        file_info = {
+            'title': 'f.nc',
+            'url': ['https://test.com/f.nc|HTTPServer'],
+            'checksum': ['x'], 'checksum_type': ['sha256']
+        }
+        with patch.object(self.downloader, "verify_checksum", return_value=False):
+            with patch("requests.Session.get") as mget:
+                mresp = Mock()
+                mresp.iter_content.return_value = [b"x"]
+                mresp.raise_for_status.return_value = None
+                mget.return_value = mresp
+                path, failed = self.downloader.download_file(file_info)
+        self.assertIsNone(path)
+        self.assertEqual(failed, file_info)
+
+    def test_retry_failed_exception_during_future(self):
+        file_info = {'title': 'f.nc', 'url': ['https://test.com/f.nc|HTTPServer']}
+        self.downloader.executor = Mock()
+        future = Mock()
+        future.result.side_effect = Exception("boom")
+        self.downloader.pending_futures = [future]
+        self.downloader.query_handler.fetch_specific_file = lambda x, y: x
+        result = self.downloader.retry_failed([file_info])
+        self.assertEqual(len(result[1]), 1)
+
+    def test_run_download_missing_retry_file(self):
+        args = Mock()
+        args.retry_failed = "nonexistent.json"
+        args.config = None
+        args.project = "CMIP6"
+        args.output_dir = "/tmp/downloads"
+        args.metadata_dir = "/tmp/metadata"
+        args.save_mode = "flat"
+        args.workers = 1
+        args.retries = 1
+        args.timeout = 5
+        args.max_downloads = 1
+        args.id = None
+        args.password = None
+        args.no_verify_ssl = False
+        args.openid = None
+        args.extra_params = None
+        args.latest = False
+        args.demo = False
+        args.test = False
+        args.variable = "tas"
+        args.activity = args.experiment = args.frequency = None
+        args.ensemble = args.institution = args.model = args.source_type = None
+        args.grid_label = args.resolution = None
+        args.dry_run = False
+
+        path = Path(args.retry_failed)
+        if path.exists():
+            path.unlink()
+
+        with self.assertRaises(SystemExit) as cm:
             run_download(args)
-        assert "Retry file nonexistent.json does not exist" in caplog.text
+        self.assertEqual(cm.exception.code, 1)
+
+    def test_run_download_dry_run(self):
+        args = Mock()
+        args.retry_failed = None
+        args.config = None
+        args.project = "CMIP6"
+        args.output_dir = "/tmp/downloads"
+        args.metadata_dir = "/tmp/metadata"
+        args.save_mode = "flat"
+        args.workers = 1
+        args.retries = 1
+        args.timeout = 5
+        args.max_downloads = 1
+        args.id = None
+        args.password = None
+        args.no_verify_ssl = False
+        args.openid = None
+        args.latest = False
+        args.extra_params = None
+        args.demo = False
+        args.test = False
+        args.variable = "tas"
+        args.activity = args.experiment = args.frequency = None
+        args.ensemble = args.institution = args.model = args.source_type = None
+        args.grid_label = args.resolution = None
+        args.dry_run = True
+
+        with patch.object(QueryHandler, "fetch_datasets", return_value=[{"title": "f.nc"}]):
+            with self.assertRaises(SystemExit) as cm:
+                run_download(args)
+        self.assertEqual(cm.exception.code, 0)
+
+    def test_run_download_extra_params_invalid_json(self):
+        args = Mock()
+        args.retry_failed = None
+        args.config = None
+        args.project = "CMIP6"
+        args.output_dir = "/tmp/downloads"
+        args.metadata_dir = "/tmp/metadata"
+        args.save_mode = "flat"
+        args.workers = 1
+        args.retries = 1
+        args.timeout = 5
+        args.max_downloads = 1
+        args.id = None
+        args.password = None
+        args.no_verify_ssl = False
+        args.openid = None
+        args.latest = False
+        args.extra_params = "{bad_json: true"  # malformed
+        args.demo = False
+        args.test = False
+        args.variable = "tas"
+        args.activity = args.experiment = args.frequency = None
+        args.ensemble = args.institution = args.model = args.source_type = None
+        args.grid_label = args.resolution = None
+        args.dry_run = False
+
+        with self.assertRaises(SystemExit) as cm:
+            run_download(args)
+        self.assertEqual(cm.exception.code, 1)
+
+if __name__ == '__main__':
+    unittest.main()

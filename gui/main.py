@@ -332,7 +332,7 @@ def apply_theme(
     """)
 
 # --------------------------- constants ---------------------------
-LOGO_SIZE = (350, 150)
+LOGO_SIZE = (250, 100)
 COPYRIGHT_TEXT = "© 2025 Bhuwan Shah  |  GridFlow"
 ABOUT_DIALOG_HTML = (
     "<h2>GridFlow</h2>"
@@ -411,7 +411,7 @@ class GridFlowGUI(QMainWindow):
     log_signal = pyqtSignal(str)
     progress_signal = pyqtSignal(int, int)
 
-    def __init__(self):
+    def __init__(self, base_pt: int = 14):
         super().__init__()
 
         VOCAB_DIR = Path(__file__).parent / "vocab"
@@ -425,7 +425,6 @@ class GridFlowGUI(QMainWindow):
                 # Running as script
                 base_path = Path(__file__).parent / 'vocab'
             f = Path(base_path) / name
-            self.log_signal.emit(f"Attempting to load vocab file: {f}")
             if not f.exists():
                 self.log_signal.emit(f"Vocab file not found: {f}")
                 return []
@@ -434,7 +433,7 @@ class GridFlowGUI(QMainWindow):
             except json.JSONDecodeError as e:
                 self.log_signal.emit(f"Failed to parse vocab file {f}: {e}")
                 return []
-        
+
         # CMIP6 vocab
         self.cmip6_activity_id     = _load("cmip6_activity_id.json")
         self.cmip6_experiment_id   = _load("cmip6_experiment_id.json")
@@ -447,7 +446,7 @@ class GridFlowGUI(QMainWindow):
         self.cmip6_institution_id  = _load("cmip6_institution_id.json")
         self.cmip6_source_type     = _load("cmip6_source_type.json")
         self.cmip6_frequency       = _load("cmip6_time_frequency.json")
-        self.cmip6_resolution       = _load("cmip6_resolution.json")
+        self.cmip6_resolution      = _load("cmip6_resolution.json")
 
         # CMIP5 vocab
         self.cmip5_model           = _load("cmip5_model.json")
@@ -458,8 +457,8 @@ class GridFlowGUI(QMainWindow):
         self.cmip5_institute       = _load("cmip5_institute.json")
 
         self.setWindowTitle("GridFlow Data Processor")
-        # self.setGeometry(100, 100, 940, 680)
         self.worker_thread: Optional[WorkerThread] = None
+        self.current_font_base = base_pt  # Store base font size
 
         self.init_ui()
         self.init_logging()
@@ -489,10 +488,19 @@ class GridFlowGUI(QMainWindow):
         The form card has its own QScrollArea for independent scrolling of arguments.
         A vertical QSplitter separates the top section from the log pane.
         """
+        # Detect small screen
+        scr = QApplication.primaryScreen().size()
+        small_screen = scr.width() < 1280
+        margin = 8 if small_screen else 12
+        spacing = 5 if small_screen else 8
+        # Scale logo height based on resolution (smaller overall)
+        base_logo_height = 80 if small_screen else 120  # Reduced base height
+        logo_height = int(base_logo_height * (scr.height() / 1080))  # Scale with screen height (1080 as reference)
+
         # Central container
         container = QWidget()
         vmain = QVBoxLayout(container)
-        vmain.setSpacing(15)
+        vmain.setSpacing(spacing)
         self.setCentralWidget(container)
 
         # Maximize window on startup
@@ -510,8 +518,8 @@ class GridFlowGUI(QMainWindow):
             }
         """)
         vmain.addWidget(splitter)
-        splitter.setStretchFactor(0, 3)
-        splitter.setStretchFactor(1, 1)
+        splitter.setStretchFactor(0, 7)  # Top pane 70%
+        splitter.setStretchFactor(1, 3)  # Log pane 30%
 
         # TOP PANE
         top_scroll = QScrollArea()
@@ -521,26 +529,23 @@ class GridFlowGUI(QMainWindow):
 
         upper = QWidget()
         ulay = QVBoxLayout(upper)
-        ulay.setSpacing(20)
-        # allocate space: header 2, form 3, controls 1
-        ulay.setStretch(0, 2)   # header card
-        ulay.setStretch(1, 3)   # form card
-        ulay.setStretch(2, 1)   # workers/buttons row
+        ulay.setSpacing(spacing)
+        # Adjusted stretch factors to minimize header and maximize form
+        ulay.setStretch(0, 1)  # Header card (reduced to ~10%)
+        ulay.setStretch(1, 8)  # Form card (maximized to ~80%)
+        ulay.setStretch(2, 1)  # Workers/buttons row (~10%)
         top_scroll.setWidget(upper)
 
         # HEADER CARD (logo + pickers)
         header = QWidget(objectName="card")
         h = QVBoxLayout(header)
-        h.setContentsMargins(20, 20, 20, 20)
+        h.setContentsMargins(margin, margin, margin, margin)
         h.setAlignment(Qt.AlignHCenter)
-        splitter.setStretchFactor(0, 4)
-        splitter.setStretchFactor(1, 6)
 
         # Logo inside "halo"
-        self.logo_lbl = QLabel(alignment=Qt.AlignCenter)  # Initialize self.logo_lbl
-        # allow the QLabel to grow and shrink, but preserve aspect ratio
+        self.logo_lbl = QLabel(alignment=Qt.AlignCenter)
         self.logo_lbl.setScaledContents(True)
-        self.logo_lbl.setMaximumHeight(150)    # a soft cap, not a hard fixed size
+        self.logo_lbl.setMaximumHeight(logo_height)
         self.logo_lbl.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
         self.update_logo_pixmap()
 
@@ -556,11 +561,11 @@ class GridFlowGUI(QMainWindow):
 
         halo = QWidget(objectName="halo")
         halo_l = QVBoxLayout(halo)
-        halo_l.setContentsMargins(15, 15, 15, 15)
+        halo_l.setContentsMargins(10, 10, 10, 10)  # Reduced margins for smaller logo area
         halo_l.addWidget(self.logo_lbl, 0, Qt.AlignCenter)
         h.addWidget(halo)
 
-        # Picker form
+        # Picker form (unchanged)
         header_form = QFormLayout()
         header_form.setLabelAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         header_form.setHorizontalSpacing(20)
@@ -580,12 +585,10 @@ class GridFlowGUI(QMainWindow):
         self.src_combo = QComboBox()
         self.src_combo.addItems(["CMIP6", "CMIP5", "PRISM"])
         self.src_combo.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Fixed)
-        self.src_combo.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Fixed)
 
         proc_lbl = mk_label("Process:")
         self.proc_combo = QComboBox()
         self.proc_combo.addItems(["Download", "Spatial Crop", "Spatial Clip", "Catalog Build"])
-        self.proc_combo.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Fixed)
         self.proc_combo.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Fixed)
 
         self.src_combo.currentTextChanged.connect(
@@ -601,13 +604,11 @@ class GridFlowGUI(QMainWindow):
         h.addLayout(header_form)
         ulay.addWidget(header)
 
-        # FORM CARD (scrollable)
+        # FORM CARD (scrollable) - maximized
         form_card = QWidget(objectName="card")
         form_l = QVBoxLayout(form_card)
-        form_l.setContentsMargins(20, 20, 20, 20)
-        # form_card.setMinimumHeight(300)  # Prevent form from squeezing too much
+        form_l.setContentsMargins(margin, margin, margin, margin)
 
-        # Scrollable form area
         form_scroll = QScrollArea()
         form_scroll.setWidgetResizable(True)
         form_scroll.setStyleSheet("QScrollArea { border: none; }")
@@ -622,17 +623,15 @@ class GridFlowGUI(QMainWindow):
         self.form_layout = QFormLayout()
         self.form_layout.setRowWrapPolicy(QFormLayout.DontWrapRows)
         self.form_layout.setLabelAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-        # self.form_layout.setLabelAlignment(Qt.AlignRight | Qt.AlignVCenter)
         self.form_layout.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
         self.form_layout.setHorizontalSpacing(20)
-        self.form_layout.setHorizontalSpacing(26)
         self.form_layout.setVerticalSpacing(12)
-        self.form_layout.setContentsMargins(20, 20, 20, 20)
+        self.form_layout.setContentsMargins(margin, margin, margin, margin)
         form_content_l.addLayout(self.form_layout)
         self.arg_widgets = {}
         ulay.addWidget(form_card)
 
-        # Workers + verbosity + buttons
+        # Workers + verbosity + buttons (unchanged)
         cfg_row = QHBoxLayout()
         cfg_row.addWidget(QLabel("Workers:"))
         self.workers_edit = QLineEdit("4")
@@ -669,25 +668,21 @@ class GridFlowGUI(QMainWindow):
         log_layout.setContentsMargins(10, 10, 10, 10)
 
         self.log_text = QTextEdit(readOnly=True)
-        # self.log_text.setMinimumHeight(120)
         self.log_text.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.log_text.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         log_layout.addWidget(self.log_text)
         splitter.addWidget(log_container)
 
-        splitter.setStretchFactor(0, 3)  # Top grows more
-        splitter.setStretchFactor(1, 1)
+        splitter.setCollapsible(0, False)  # Prevent top from collapsing
+        splitter.setCollapsible(1, True)   # Allow log to collapse
 
-        # Restore saved splitter sizes, or fall back to first-run/default
+        # Set splitter sizes for 70% top, 30% log
+        total_height = 768  # Default window height
         saved = QSettings(_SETTINGS_ORG, _SETTINGS_APP).value("split_sizes")
         if saved:
             splitter.setSizes([int(s) for s in saved])
         else:
-            splitter.setSizes([600, 100] if is_first_run() else [500, 100])
-
-        splitter.setCollapsible(0, False)  # Prevent top from collapsing
-        splitter.setCollapsible(1, True)   # Allow log to collapse
-        # upper.setMinimumHeight(600)
+            splitter.setSizes([int(total_height * 0.7), int(total_height * 0.3)])
 
         # Footer
         footer = QLabel(COPYRIGHT_TEXT, alignment=Qt.AlignCenter)
@@ -707,7 +702,6 @@ class GridFlowGUI(QMainWindow):
         self.theme_menu.actions()[3].setChecked(True)
 
         self.current_theme = "ocean"
-        self.current_font_base = 14
 
         view_menu = self.menuBar().addMenu("&View")
         font_menu = QMenu("Font &Size  aA", self)
@@ -718,6 +712,12 @@ class GridFlowGUI(QMainWindow):
             act.triggered.connect(lambda ch=False, s=size: self.set_font_size(s))
             font_menu.addAction(act)
             self.font_size_actions[size] = act
+
+        # Set initial font size based on screen size
+        if small_screen:
+            self.set_font_size(12)
+        else:
+            self.set_font_size(self.current_font_base)
         self.font_size_actions[self.current_font_base].setChecked(True)
 
         apply_theme(QApplication.instance(),
@@ -730,7 +730,6 @@ class GridFlowGUI(QMainWindow):
         QTimer.singleShot(500, self.maybe_show_tutorial)
         self.skill_combo.setCurrentText("Beginner")
         QTimer.singleShot(0, self.logo_anim.start)
-
 
     def update_logo_pixmap(self):
         # Cache the scaled pixmap to avoid repeated scaling
@@ -751,8 +750,15 @@ class GridFlowGUI(QMainWindow):
             self.logo_lbl.clear()
             return
 
+        # Get screen resolution
+        scr = QApplication.primaryScreen().size()
+        # Scale logo size based on resolution (using 1920x1080 as reference)
+        base_width, base_height = 250, 100  # Reduced base size
+        scale_factor = min(scr.width() / 1920, scr.height() / 1080)  # Scale down for smaller screens
+        max_w = int(base_width * scale_factor)
+        max_h = int(base_height * scale_factor)
+
         pm = QPixmap(str(logo_file))
-        max_w, max_h = LOGO_SIZE  # 350, 150
         pm = pm.scaled(max_w, max_h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
         self._cached_logo_pixmap = pm  # Cache the pixmap
         self.logo_lbl.setPixmap(pm)
@@ -1363,13 +1369,27 @@ class GridFlowGUI(QMainWindow):
             QSettings(_SETTINGS_ORG, _SETTINGS_APP).setValue("split_sizes", sizes)
         super().closeEvent(event)
 
+def pick_base_font():
+    scr = QApplication.primaryScreen().size()
+    # If width < 1280, use smaller font
+    if scr.width() < 1280:
+        return 11
+    return 14
 
 def main():
+    # 1) Set the DPI attributes BEFORE creating the application:
     QtCore.QCoreApplication.setAttribute(QtCore.Qt.AA_EnableHighDpiScaling, True)
-    QtCore.QCoreApplication.setAttribute(QtCore.Qt.AA_UseHighDpiPixmaps, True)
+    QtCore.QCoreApplication.setAttribute(QtCore.Qt.AA_UseHighDpiPixmaps,  True)
+
+    # 2) Now create the QApplication exactly once
     app = QApplication(sys.argv)
-    wnd = GridFlowGUI()
+
+    # 3) Pick a base font size, build your window, show it
+    base_pt = pick_base_font()
+    wnd = GridFlowGUI(base_pt=base_pt)
     wnd.show()
+
+    # 4) Enter the main loop
     sys.exit(app.exec_())
 
 if __name__ == "__main__":

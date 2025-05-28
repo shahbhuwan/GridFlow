@@ -1,0 +1,43 @@
+{
+  "ScenarioMIP:CMCC-ESM2:r1i1p1f1": {
+    "activity_id": "ScenarioMIP",
+    "source_id": "CMCC-ESM2",
+    "variant_label": "r1i1p1f1",
+    "institution_id": "CMCC",
+    "variables": {
+      "tas": {
+        "file_count": 4,
+        "files": [
+          {
+            "path": "cmip6_data\\ScenarioMIP_100km_tas_Amon_CMCC-ESM2_ssp126_r1i1p1f1_gn_201501-210012.nc"
+          },
+          {
+            "path": "cmip6_data\\ScenarioMIP_100km_tas_Amon_CMCC-ESM2_ssp245_r1i1p1f1_gn_201501-210012.nc"
+          },
+          {
+            "path": "cmip6_data\\ScenarioMIP_100km_tas_Amon_CMCC-ESM2_ssp534-over_r1i1p1f1_gn_201501-210012.nc"
+          },
+          {
+            "path": "cmip6_data\\ScenarioMIP_100km_tas_Amon_CMCC-ESM2_ssp585_r1i1p1f1_gn_201501-210012.nc"
+          }
+        ]
+      }
+    }
+  },
+  "ScenarioMIP AerChemMIP:CMCC-ESM2:r1i1p1f1": {
+    "activity_id": "ScenarioMIP AerChemMIP",
+    "source_id": "CMCC-ESM2",
+    "variant_label": "r1i1p1f1",
+    "institution_id": "CMCC",
+    "variables": {
+      "tas": {
+        "file_count": 1,
+        "files": [
+          {
+            "path": "cmip6_data\\ScenarioMIP_100km_tas_Amon_CMCC-ESM2_ssp370_r1i1p1f1_gn_201501-210012.nc"
+          }
+        ]
+      }
+    }
+  }
+}

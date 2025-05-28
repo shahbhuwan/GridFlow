@@ -14,6 +14,7 @@
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 import logging
+import threading
 import requests
 import hashlib
 import os
@@ -24,6 +25,7 @@ from dateutil.relativedelta import relativedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from threading import Lock
 from typing import List, Dict, Optional, Tuple
+from .thread_stopper import ThreadManager
 
 logging_lock = Lock()
 success_lock = Lock()
@@ -104,98 +106,6 @@ def check_data_availability(variable: str, resolution: str, time_step: str, year
             logging.warning(f"Data unavailable for {variable} on {date_str} ({time_step}, {resolution}): {e}, skipping")
         return None
 
-class Downloader:
-    def __init__(self, file_manager: FileManager, retries: int, timeout: int, workers: int):
-        self.file_manager = file_manager
-        self.retries = retries
-        self.timeout = timeout
-        self.workers = workers
-        self.successful_downloads = 0
-
-    def download_file(self, file_info: Dict, attempt: int = 1) -> Optional[str]:
-        url = file_info['url']
-        output_path = file_info['output_path']
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-
-        for attempt in range(1, self.retries + 1):
-            try:
-                with logging_lock:
-                    logging.debug(f"Attempting to download {url} (Attempt {attempt}/{self.retries})")
-                response = requests.get(url, stream=True, timeout=self.timeout)
-                with logging_lock:
-                    logging.debug(f"HTTP response for {url}: {response.status_code}")
-                response.raise_for_status()
-
-                expected_size = int(response.headers.get('Content-Length', 0))
-                with logging_lock:
-                    logging.debug(f"Expected file size for {url}: {expected_size} bytes")
-
-                downloaded_size = 0
-                with open(output_path, 'wb') as f:
-                    for chunk in response.iter_content(chunk_size=8192):
-                        if chunk:
-                            f.write(chunk)
-                            downloaded_size += len(chunk)
-
-                if expected_size > 0 and downloaded_size != expected_size:
-                    with logging_lock:
-                        logging.error(f"File size mismatch for {output_path.name}: expected {expected_size} bytes, got {downloaded_size} bytes")
-                    return None
-
-                sha256_checksum = compute_sha256(output_path)
-                with logging_lock:
-                    logging.info(f"SHA256 checksum for {output_path.name}: {sha256_checksum}")
-                    logging.warning("Note: PRISM server does not provide checksums for verification. Compare manually if needed.")
-                    logging.info(f"Downloaded {output_path.name}")
-                with success_lock:
-                    self.successful_downloads += 1
-                return str(output_path)
-            except requests.RequestException as e:
-                with logging_lock:
-                    logging.warning(f"Download failed for {url} (Attempt {attempt}/{self.retries}): {e}")
-                if attempt == self.retries:
-                    with logging_lock:
-                        logging.error(f"Failed to download {url} after {self.retries} attempts")
-                    return None
-        return None
-
-    def download_all(self, files: List[Dict], stop_flag: callable = None) -> List[str]:
-        downloaded_files = []
-        total_files = len(files)
-        if total_files == 0:
-            with logging_lock:
-                logging.info("No files to download")
-            return []
-
-        progress_interval = max(1, total_files // 10)
-        completed = 0
-        next_threshold = progress_interval
-
-        with ThreadPoolExecutor(max_workers=self.workers) as executor:
-            future_to_file = {executor.submit(self.download_file, f): f for f in files}
-            for future in as_completed(future_to_file):
-                if stop_flag and stop_flag():
-                    with logging_lock:
-                        logging.info("PRISM download stopped by user")
-                    executor.shutdown(wait=False)
-                    return downloaded_files
-                try:
-                    path = future.result()
-                    if path:
-                        downloaded_files.append(path)
-                except Exception as e:
-                    with logging_lock:
-                        logging.error(f"Unexpected error in download task: {e}")
-                completed += 1
-                with logging_lock:
-                    if completed >= next_threshold:
-                        logging.info(f"Progress: {completed}/{total_files} files")
-                        next_threshold += progress_interval
-
-        with logging_lock:
-            logging.info(f"Final Progress: {completed}/{total_files} files")
-        return downloaded_files
-
 def validate_date(date_str: str, time_step: str) -> bool:
     try:
         if time_step == "daily":
@@ -235,6 +145,128 @@ def validate_date(date_str: str, time_step: str) -> bool:
             logging.error(f"Invalid date format: {date_str}. Expected {expected_format} for {time_step} data. Error: {e}")
         return False
 
+class Downloader:
+    def __init__(self, file_manager: FileManager, retries: int, timeout: int, workers: int):
+        self.file_manager = file_manager
+        self.retries = retries
+        self.timeout = timeout
+        self.workers = workers
+        self.successful_downloads = 0
+        self.thread_manager = ThreadManager(verbose=False)  # Initialize ThreadManager for thread control
+        self.downloaded_files_lock = Lock()  # Lock for thread-safe updates to downloaded_files
+
+    def download_file(self, file_info: Dict, attempt: int = 1) -> Optional[str]:
+        # Check if shutdown is requested
+        if self.thread_manager.is_shutdown():
+            with logging_lock:
+                logging.info(f"Download stopped for {file_info['url']}")
+            return None
+
+        url = file_info['url']
+        output_path = file_info['output_path']
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+
+        for attempt in range(1, self.retries + 1):
+            # Check shutdown before each attempt
+            if self.thread_manager.is_shutdown():
+                with logging_lock:
+                    logging.info(f"Download stopped for {url}")
+                return None
+
+            try:
+                with logging_lock:
+                    logging.debug(f"Attempting to download {url} (Attempt {attempt}/{self.retries})")
+                response = requests.get(url, stream=True, timeout=self.timeout)
+                with logging_lock:
+                    logging.debug(f"HTTP status code for {url}: {response.status_code}")
+                response.raise_for_status()
+
+                expected_size = int(response.headers.get('Content-Length', 0))
+                with logging_lock:
+                    logging.debug(f"Expected file size for {url}: {expected_size} bytes")
+
+                downloaded_size = 0
+                with open(output_path, 'wb') as f:
+                    for chunk in response.iter_content(chunk_size=8192):
+                        # Check shutdown during chunked download
+                        if self.thread_manager.is_shutdown():
+                            with logging_lock:
+                                logging.info(f"Download interrupted for {url}")
+                            return None
+                        if chunk:
+                            f.write(chunk)
+                            downloaded_size += len(chunk)
+
+                if expected_size > 0 and downloaded_size != expected_size:
+                    with logging_lock:
+                        logging.error(f"File size mismatch for {output_path.name}: expected {expected_size} bytes, got {downloaded_size} bytes")
+                    return None
+
+                sha256_checksum = compute_sha256(output_path)
+                with logging_lock:
+                    logging.info(f"SHA256 checksum for {output_path.name}: {sha256_checksum}")
+                    logging.warning("Note: PRISM server does not provide checksums for verification. Compare manually if needed.")
+                    logging.info(f"Downloaded {output_path.name}")
+                with success_lock:
+                    self.successful_downloads += 1
+                return str(output_path)
+            except requests.RequestException as e:
+                with logging_lock:
+                    logging.warning(f"Download failed for {url} (Attempt {attempt}/{self.retries}): {e}")
+                if attempt == self.retries:
+                    with logging_lock:
+                        logging.error(f"Failed to download {url} after {self.retries} attempts")
+                    return None
+        return None
+
+    def download_all(self, files: List[Dict]) -> List[str]:
+        downloaded_files = []
+        total_files = len(files)
+        if total_files == 0:
+            with logging_lock:
+                logging.info("No files to download")
+            return []
+
+        def worker_function(shutdown_event: threading.Event):
+            with ThreadPoolExecutor(max_workers=self.workers) as executor:
+                future_to_file = {executor.submit(self.download_file, f): f for f in files}
+                for future in as_completed(future_to_file):
+                    if shutdown_event.is_set():
+                        with logging_lock:
+                            logging.info("Download tasks stopped")
+                        return
+                    try:
+                        path = future.result()
+                        if path:
+                            with self.downloaded_files_lock:
+                                downloaded_files.append(path)
+                    except Exception as e:
+                        with logging_lock:
+                            logging.error(f"Unexpected error in download task: {e}")
+                    with logging_lock:
+                        logging.info(f"Progress: {len(downloaded_files)}/{total_files} files")
+            with logging_lock:
+                logging.debug("Worker function completed")
+
+        # Add worker to ThreadManager
+        self.thread_manager.add_worker(worker_function, "PRISM_Download_Worker")
+
+        # Wait for threads to complete with timeout
+        import time
+        start_time = time.time()
+        timeout = 30  # seconds
+        while self.thread_manager.is_running() and not self.thread_manager.is_shutdown():
+            if time.time() - start_time > timeout:
+                with logging_lock:
+                    logging.error("Download timeout reached, stopping worker")
+                self.thread_manager.stop()
+                break
+            time.sleep(0.1)
+
+        with logging_lock:
+            logging.info(f"Final Progress: {len(downloaded_files)}/{total_files} files")
+        return downloaded_files
+
 def download_prism(
     variable: str,
     resolution: str,
@@ -247,8 +279,7 @@ def download_prism(
     retries: int = 3,
     timeout: int = 30,
     demo: bool = False,
-    workers: int = None,
-    stop_flag: callable = None
+    workers: int = None
 ) -> bool:
     VALID_VARIABLES = ['ppt', 'tmax', 'tmin', 'tmean', 'tdmean', 'vpdmin', 'vpdmax']
     if variable not in VALID_VARIABLES:
@@ -258,111 +289,117 @@ def download_prism(
 
     metadata_prefix = "gridflow_prism_"
     file_manager = FileManager(output_dir, metadata_dir, metadata_prefix)
-
-    if demo:
-        variable = "tmean"
-        resolution = "4km"
-        time_step = "monthly"
-        start_date = "2020-01"
-        end_date = "2020-03"
-        workers = 4
-        with logging_lock:
-            logging.info("Running in demo mode: downloading tmean for January–March 2020 (monthly, 4km)")
-
-    if not validate_date(start_date, time_step):
-        raise ValueError(f"Invalid start date: {start_date}")
-    if not validate_date(end_date, time_step):
-        raise ValueError(f"Invalid end date: {end_date}")
-
-    start_dt = datetime.strptime(start_date, '%Y-%m-%d' if '-' in start_date else '%Y%m%d') if time_step == 'daily' else \
-               datetime.strptime(start_date, '%Y-%m' if '-' in start_date else '%Y%m')
-    end_dt = datetime.strptime(end_date, '%Y-%m-%d' if '-' in end_date else '%Y%m%d') if time_step == 'daily' else \
-             datetime.strptime(end_date, '%Y-%m' if '-' in end_date else '%Y%m')
-    if time_step == 'monthly':
-        end_dt = end_dt + relativedelta(months=1) - timedelta(days=1)
-
-    if start_dt > end_dt:
-        with logging_lock:
-            logging.error("start_date must be before or equal to end_date")
-        raise ValueError("Start date must be before or equal to end date")
-
-    # Generate list of dates to check
-    dates_to_check = []
-    current_dt = start_dt
-    while current_dt <= end_dt:
-        year = current_dt.year
-        date_str = current_dt.strftime('%Y%m%d' if time_step == 'daily' else '%Y%m')
-        dates_to_check.append((variable, resolution, time_step, year, date_str))
-        current_dt += timedelta(days=1) if time_step == 'daily' else relativedelta(months=1)
-
-    # Initialize downloader and files list
     downloader = Downloader(file_manager, retries, timeout, workers or os.cpu_count() or 4)
-    files_to_download = []
-    files_to_download_all = []
-    chunk_size = downloader.workers  # Chunk size equals number of workers
 
-    # Process dates in chunks
-    for i in range(0, len(dates_to_check), chunk_size):
-        chunk = dates_to_check[i:i + chunk_size]
-        chunk_files = []
-        existing_files = []
-
-        # Parallel availability checks for the chunk
-        with ThreadPoolExecutor(max_workers=chunk_size) as executor:
-            future_to_date = {
-                executor.submit(check_data_availability, *args): args
-                for args in chunk
-            }
-            for future in as_completed(future_to_date):
-                if stop_flag and stop_flag():
-                    with logging_lock:
-                        logging.info("PRISM availability check stopped by user")
-                    executor.shutdown(wait=False)
-                    return False
-                try:
-                    result = future.result()
-                    if result:
-                        url = result['url']
-                        date_str = result['date']
-                        output_path = file_manager.get_output_path(variable, resolution, date_str)
-                        file_info = {'url': url, 'output_path': output_path, 'date': date_str}
-                        if output_path.exists():
-                            with logging_lock:
-                                logging.info(f"File {output_path.name} already exists")
-                            existing_files.append(file_info)
-                            with success_lock:
-                                downloader.successful_downloads += 1
-                        else:
-                            chunk_files.append(file_info)
-                        files_to_download_all.append(file_info)
-                except Exception as e:
-                    with logging_lock:
-                        logging.error(f"Error checking availability: {e}")
-
-        if chunk_files or existing_files:
+    try:
+        if demo:
+            variable = "tmean"
+            resolution = "4km"
+            time_step = "monthly"
+            start_date = "2020-01"
+            end_date = "2020-03"
+            workers = 4
             with logging_lock:
-                logging.info(f"Found {len(chunk_files) + len(existing_files)} {time_step} files in chunk {i // chunk_size + 1} "
-                             f"({len(existing_files)} existing, {len(chunk_files)} to download)")
-            # Download files in parallel for this chunk
-            downloaded = downloader.download_all(chunk_files, stop_flag=stop_flag)
-            files_to_download.extend(downloaded)
+                logging.info("Running in demo mode: downloading tmean for January–March 2020 (monthly, 4km)")
 
-        if stop_flag and stop_flag():
+        if not validate_date(start_date, time_step):
+            raise ValueError(f"Invalid start date: {start_date}")
+        if not validate_date(end_date, time_step):
+            raise ValueError(f"Invalid end date: {end_date}")
+
+        start_dt = datetime.strptime(start_date, '%Y-%m-%d' if '-' in start_date else '%Y%m%d') if time_step == 'daily' else \
+                   datetime.strptime(start_date, '%Y-%m' if '-' in start_date else '%Y%m')
+        end_dt = datetime.strptime(end_date, '%Y-%m-%d' if '-' in end_date else '%Y%m%d') if time_step == 'daily' else \
+                 datetime.strptime(end_date, '%Y-%m' if '-' in end_date else '%Y%m')
+        if time_step == 'monthly':
+            end_dt = end_dt + relativedelta(months=1) - timedelta(days=1)
+
+        if start_dt > end_dt:
             with logging_lock:
-                logging.info("PRISM process stopped by user")
-            break
+                logging.error("start_date must be before or equal to end_date")
+            raise ValueError("Start date must be before or equal to end date")
 
-    if not files_to_download_all:
+        # Generate list of dates to check
+        dates_to_check = []
+        current_dt = start_dt
+        while current_dt <= end_dt:
+            year = current_dt.year
+            date_str = current_dt.strftime('%Y%m%d' if time_step == 'daily' else '%Y%m')
+            dates_to_check.append((variable, resolution, time_step, year, date_str))
+            current_dt += timedelta(days=1) if time_step == 'daily' else relativedelta(months=1)
+
+        # Process dates in chunks
+        files_to_download = []
+        files_to_download_all = []
+        chunk_size = max(1, downloader.workers)  # Ensure chunk_size is at least 1
+
         with logging_lock:
-            logging.error("No PRISM files to download")
-        raise ValueError("No PRISM files available for download")
+            logging.info(f"Checking availability for {len(dates_to_check)} {time_step} files")
 
-    with logging_lock:
-        logging.info(f"Total found {len(files_to_download_all)} {time_step} files to download")
+        for i in range(0, len(dates_to_check), chunk_size):
+            chunk = dates_to_check[i:i + chunk_size]
+            chunk_files = []
+            existing_files = []
 
-    # Save metadata for all files (existing and downloaded)
-    file_manager.save_metadata(files_to_download_all, "query_results.json")
+            with ThreadPoolExecutor(max_workers=chunk_size) as executor:
+                future_to_date = {
+                    executor.submit(check_data_availability, *args): args
+                    for args in chunk
+                }
+                for future in as_completed(future_to_date):
+                    if downloader.thread_manager.is_shutdown():
+                        with logging_lock:
+                            logging.info("Availability checks stopped")
+                        return False
+                    try:
+                        result = future.result()
+                        if result:
+                            url = result['url']
+                            date_str = result['date']
+                            output_path = file_manager.get_output_path(variable, resolution, date_str)
+                            file_info = {'url': url, 'output_path': output_path, 'date': date_str}
+                            if output_path.exists():
+                                with logging_lock:
+                                    logging.info(f"File {output_path.name} already exists")
+                                existing_files.append(file_info)
+                                with success_lock:
+                                    downloader.successful_downloads += 1
+                            else:
+                                chunk_files.append(file_info)
+                            files_to_download_all.append(file_info)
+                    except Exception as e:
+                        with logging_lock:
+                            logging.error(f"Error checking availability: {e}")
 
-    with logging_lock:
-        logging.info(f"Completed: {downloader.successful_downloads}/{len(files_to_download_all)} files processed successfully")
-    return downloader.successful_downloads > 0
+            if chunk_files or existing_files:
+                with logging_lock:
+                    logging.info(f"Found {len(chunk_files) + len(existing_files)} {time_step} files in chunk {i // chunk_size + 1} "
+                                 f"({len(existing_files)} existing, {len(chunk_files)} to download)")
+                downloaded = downloader.download_all(chunk_files)
+                files_to_download.extend(downloaded)
+
+        if not files_to_download_all:
+            with logging_lock:
+                logging.error("No PRISM files to download")
+            raise ValueError("No PRISM files available for download")
+
+        with logging_lock:
+            logging.info(f"Total found {len(files_to_download_all)} {time_step} files to download")
+
+        # Save metadata for all files (existing and downloaded)
+        file_manager.save_metadata(files_to_download_all, "query_results.json")
+
+        with logging_lock:
+            logging.info(f"Completed: {downloader.successful_downloads}/{len(files_to_download_all)} files processed successfully")
+        return downloader.successful_downloads > 0
+
+    except ValueError as e:
+        with logging_lock:
+            logging.error(f"Download process failed: {e}")
+        raise  # Re-raise ValueError for test cases
+    except Exception as e:
+        with logging_lock:
+            logging.error(f"Download process failed: {e}")
+        return False
+    finally:
+        downloader.thread_manager.stop()  # Ensure all threads are stopped
