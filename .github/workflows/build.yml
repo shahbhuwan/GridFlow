@@ -12,8 +12,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [ windows-latest, macos-latest, ubuntu-latest ]
-        python-version: [ "3.11" ]
+        os: [windows-latest, macos-latest, ubuntu-latest]
+        python-version: ["3.11"]
 
     steps:
     - name: Checkout code
@@ -54,14 +54,13 @@ jobs:
     - name: Install Python dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install pyinstaller==6.10.0
-        pip install fiona
+        pip install pyinstaller==5.13.2 fiona PyQt5==5.15.10
         pip install -r requirements.txt
       shell: bash
 
     - name: Build executable
       run: |
-        pyinstaller gridflow.spec
+        pyinstaller gridflow1.spec
       env:
         PYTHONPATH: ./gridflow
       shell: bash
