@@ -13,19 +13,28 @@ jobs:
     strategy:
       matrix:
         os: [ windows-latest, macos-latest, ubuntu-latest ]
-        python-version: [ "3.11" ]  # Updated to 3.11
+        python-version: [ "3.11" ]  # Stick with Python 3.11
 
     steps:
     - name: Checkout code
-      uses: actions/checkout@v5  # Updated to v5 (if available)
+      uses: actions/checkout@v4  # Updated to v4, verify if v5 exists
+      with:
+        lfs: true  # Enable Git LFS to handle large .nc files if tracked
+        fetch-depth: 1  # Shallow clone for faster checkout
+
+    - name: Verify Git and LFS
+      run: |
+        git --version
+        git lfs version
+      shell: bash
 
     - name: Set up Python
-      uses: actions/setup-python@v5  # Check for v6 if available
+      uses: actions/setup-python@v5  # Use v5, check for v6
       with:
         python-version: ${{ matrix.python-version }}
 
     - name: Cache Python dependencies
-      uses: actions/cache@v4  # Updated to v4 (check for v5)
+      uses: actions/cache@v4  # Use v4, check for v5
       with:
         path: ~/.cache/pip
         key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
@@ -37,27 +46,30 @@ jobs:
       run: |
         sudo apt-get update
         sudo apt-get install -y libgeos-dev libproj-dev libnetcdf-dev libgdal-dev gdal-bin
+      shell: bash
 
     - name: Install system dependencies (macOS)
       if: matrix.os == 'macos-latest'
       run: |
-        brew install gdal netcdf proj  # Added proj
+        brew install gdal netcdf proj
+      shell: bash
 
     - name: Install Python dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install pyinstaller==6.6.0  # Pin PyInstaller version (check latest version)
+        pip install pyinstaller==6.10.0  # Updated to latest stable version
         pip install fiona
         pip install -r requirements.txt
+      shell: bash
 
     - name: Build executable
       run: |
         pyinstaller gridflow.spec
       env:
-        PYTHONPATH: ./gridflow  # More explicit path
+        PYTHONPATH: ./gridflow
+      shell: bash
 
     - name: Test executable
-      shell: bash
       run: |
         case "${{ matrix.os }}" in
           windows-latest)
@@ -70,9 +82,9 @@ jobs:
             ./dist/gridflow-linux --help
             ;;
         esac
+      shell: bash
 
     - name: Rename executable
-      shell: bash
       run: |
         case "${{ matrix.os }}" in
           windows-latest)
@@ -85,9 +97,10 @@ jobs:
             mv dist/gridflow dist/gridflow-linux
             ;;
         esac
+      shell: bash
 
     - name: Upload artifacts
-      uses: actions/upload-artifact@v4  # Check for v5
+      uses: actions/upload-artifact@v4  # Use v4, check for v5
       with:
         name: gridflow-executables-${{ matrix.os }}
         path: |
@@ -95,7 +108,7 @@ jobs:
 
     - name: Attach to release
       if: startsWith(github.ref, 'refs/tags/')
-      uses: softprops/action-gh-release@v2  # Check for a newer version
+      uses: softprops/action-gh-release@v2  # Use v2, check for v3
       with:
         files: |
           dist/gridflow-*
