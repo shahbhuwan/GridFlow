@@ -334,9 +334,11 @@ LOGO_SIZE = (250, 100)
 COPYRIGHT_TEXT = "© 2025 Bhuwan Shah  |  GridFlow"
 ABOUT_DIALOG_HTML = (
     "<h2>GridFlow</h2>"
-    "<p>Graphical front-end for high-resolution climate data processing.</p>"
+    "<p>Graphical front-end for GridFlow Library.</p>"
     "<p>Copyright © 2025 Bhuwan Shah<br>"
     "Released under the AGPL-v3 licence.</p>"
+    "<p><b>GitHub:</b> <a href='https://github.com/shahbhuwan'>https://github.com/shahbhuwan/GridFlow</a><br>"
+    "<b>Email:</b> <a href='mailto:your.email@example.com'>your.email@example.com</a></p>"
 )
 LABEL_COL = 120
 COMMON_VARIABLES = ["pr", "tas", "tasmax", "tasmin", "hurs", "huss"]
@@ -736,7 +738,7 @@ class GridFlowGUI(QMainWindow):
 
         about_act = QAction("&About GridFlow..", self)
         about_act.triggered.connect(self.show_about)
-        self.menuBar().addMenu("&Help").addAction(about_act)
+        self.menuBar().addMenu("&About").addAction(about_act)
 
         self.theme_menu = self.menuBar().addMenu("&Theme")
         for t in ("Default", "Cosmic", "Sand", "Ocean"):
@@ -781,389 +783,407 @@ class GridFlowGUI(QMainWindow):
         self.update_form(self.proc_combo.currentText())
 
     def update_form(self, process: str) -> None:
-        while self.form_layout.rowCount():
-            self.form_layout.removeRow(0)
-        self.arg_widgets.clear()
+            while self.form_layout.rowCount():
+                self.form_layout.removeRow(0)
+            self.arg_widgets.clear()
 
-        src = self.src_combo.currentText()
-        skill_level = self.skill_combo.currentText()
-        exe_dir = Path(sys.executable).parent if getattr(sys, 'frozen', False) else Path(__file__).parent
+            src = self.src_combo.currentText()
+            skill_level = self.skill_combo.currentText()
 
-        if src == "PRISM" and process in ["Spatial Crop", "Spatial Clip", "Catalog Build"]:
-            QMessageBox.warning(
-                self, "Invalid Selection",
-                f"PRISM data is not compatible with {process}. "
-                "Please select CMIP5 or CMIP6 for Spatial Crop, Spatial Clip, or Catalog Build, or choose 'Download' for PRISM."
-            )
-            process = "Download"
+            if src == "PRISM" and process in ["Spatial Crop", "Spatial Clip", "Catalog Build"]:
+                QMessageBox.warning(
+                    self, "Invalid Selection",
+                    f"PRISM data is not compatible with {process}. "
+                    "Please select CMIP5 or CMIP6 for Spatial Crop, Spatial Clip, or Catalog Build, or choose 'Download' for PRISM."
+                )
+                process = "Download"
 
-        valid_processes = ["Download", "Spatial Crop", "Spatial Clip", "Catalog Build"]
-        if src == "PRISM":
-            valid_processes = ["Download"]
+            valid_processes = ["Download", "Spatial Crop", "Spatial Clip", "Catalog Build"]
+            if src == "PRISM":
+                valid_processes = ["Download"]
 
-        self.proc_combo.blockSignals(True)
-        self.proc_combo.clear()
-        self.proc_combo.addItems(valid_processes)
-        self.proc_combo.setCurrentText(process if process in valid_processes else valid_processes[0])
-        self.proc_combo.blockSignals(False)
+            self.proc_combo.blockSignals(True)
+            self.proc_combo.clear()
+            self.proc_combo.addItems(valid_processes)
+            self.proc_combo.setCurrentText(process if process in valid_processes else valid_processes[0])
+            self.proc_combo.blockSignals(False)
 
-        def add_line(label, default="", tip="", indent=0, vocab=None, required=False):
-            w = QLineEdit(default)
-            w.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-            w.setToolTip(tip)
-            w.setPlaceholderText(f"Enter {label.lower()}…" if not required else f"Enter {label.lower()} (required)")
-            if vocab:
-                comp = QCompleter(vocab, w)
-                comp.setCaseSensitivity(Qt.CaseInsensitive)
-                comp.setFilterMode(Qt.MatchContains)
-                comp.setCompletionMode(QCompleter.PopupCompletion)
-                comp.setMaxVisibleItems(12)
-                w.setCompleter(comp)
-                original_focus = w.focusInEvent
-                def on_focus(event):
-                    w.completer().setCompletionPrefix("")
-                    w.completer().complete()
-                    original_focus(event)
-                w.focusInEvent = on_focus
-            self.form_layout.addRow(mk_label(label, indent, required), w)
-            self.arg_widgets[label.lower().replace(" ", "_")] = w
+            def add_line(label, default="", tip="", indent=0, vocab=None, required=False):
+                w = QLineEdit(default)
+                w.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+                w.setToolTip(tip)
+                w.setPlaceholderText(f"Enter {label.lower()}…" if not required else f"Enter {label.lower()} (required)")
+                if vocab:
+                    comp = QCompleter(vocab, w)
+                    comp.setCaseSensitivity(Qt.CaseInsensitive)
+                    comp.setFilterMode(Qt.MatchContains)
+                    comp.setCompletionMode(QCompleter.PopupCompletion)
+                    comp.setMaxVisibleItems(12)
+                    w.setCompleter(comp)
+                    original_focus = w.focusInEvent
+                    def on_focus(event):
+                        w.completer().setCompletionPrefix("")
+                        w.completer().complete()
+                        original_focus(event)
+                    w.focusInEvent = on_focus
+                self.form_layout.addRow(mk_label(label, indent, required), w)
+                self.arg_widgets[label.lower().replace(" ", "_")] = w
 
-        def add_file(label, default="", tip="", dir_=False, indent=0, required: bool = False):
-            le = QLineEdit(default)
-            le.setToolTip(tip)
-            le.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-            placeholder = f"Select {label.lower()}"
-            if required:
-                placeholder += " (required)"
-            le.setPlaceholderText(placeholder + "...")
+            def add_file(label, default="", tip="", dir_=False, indent=0, required: bool = False):
+                le = QLineEdit(default)
+                le.setToolTip(tip)
+                le.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+                placeholder = f"Select {label.lower()}"
+                if required:
+                    placeholder += " (required)"
+                le.setPlaceholderText(placeholder + "...")
 
-            btn = QPushButton("Browse")
-            btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
-            btn.clicked.connect(lambda *_: self.browse_file(le, dir_))
+                btn = QPushButton("Browse")
+                btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+                btn.clicked.connect(lambda *_: self.browse_file(le, dir_))
 
-            wrap = QWidget()
-            hl = QHBoxLayout(wrap)
-            hl.setContentsMargins(0, 0, 0, 0)
-            hl.setSpacing(8)
-            hl.addWidget(le, 1)
-            hl.addWidget(btn, 0)
+                wrap = QWidget()
+                hl = QHBoxLayout(wrap)
+                hl.setContentsMargins(0, 0, 0, 0)
+                hl.setSpacing(8)
+                hl.addWidget(le, 1)
+                hl.addWidget(btn, 0)
 
-            self.form_layout.addRow(mk_label(label, indent, required), wrap)
-            self.form_layout.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
-            self.arg_widgets[label.lower().replace(" ", "_")] = le
+                self.form_layout.addRow(mk_label(label, indent, required), wrap)
+                self.form_layout.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+                self.arg_widgets[label.lower().replace(" ", "_")] = le
 
-        def add_chk(label, val=False, tip="", indent=0):
-            ck = QCheckBox()
-            ck.setChecked(val)
-            ck.setToolTip(tip)
-            if label in ["Latest", "No Verify SSL"]:
-                ck.setObjectName("largeCheckbox")
-            self.form_layout.addRow(mk_label(label, indent=indent), ck)
-            self.arg_widgets[label.lower().replace(" ", "_")] = ck
+            def add_chk(label, val=False, tip="", indent=0):
+                ck = QCheckBox()
+                ck.setChecked(val)
+                ck.setToolTip(tip)
+                if label in ["Latest", "No Verify SSL"]:
+                    ck.setObjectName("largeCheckbox")
+                self.form_layout.addRow(mk_label(label, indent=indent), ck)
+                self.arg_widgets[label.lower().replace(" ", "_")] = ck
 
-        def add_combo(label, opts, default="", tip="", indent=0):
-            cb = QComboBox()
-            cb.addItems(opts)
-            if default:
-                cb.setCurrentText(default)
-            cb.setToolTip(tip)
-            self.form_layout.addRow(mk_label(label, indent=indent), cb)
-            self.arg_widgets[label.lower().replace(" ", "_")] = cb
+            def add_combo(label, opts, default="", tip="", indent=0):
+                cb = QComboBox()
+                cb.addItems(opts)
+                if default:
+                    cb.setCurrentText(default)
+                cb.setToolTip(tip)
+                self.form_layout.addRow(mk_label(label, indent=indent), cb)
+                self.arg_widgets[label.lower().replace(" ", "_")] = cb
 
-        indent_amount = 0
+            indent_amount = 0
 
-        if process == "Download":
-            if src == "CMIP6":
-                proj_le = QLineEdit("CMIP6")
-                proj_le.setReadOnly(True)
-                proj_le.setEnabled(False)
-                self.form_layout.addRow(mk_label("Project:", indent_amount), proj_le)
-                self.arg_widgets["project"] = proj_le
-
-                if skill_level == "Beginner":
-                    add_line("Activity", "ScenarioMIP", "The CMIP6 activity or program (e.g., ScenarioMIP, CMIP).",
-                             indent=indent_amount, vocab=self.cmip6_activity_id, required=True)
-                    add_combo("Variable", COMMON_VARIABLES, "tas", "Select a common climate variable.",
-                              indent=indent_amount)
-                    add_line("Frequency", "mon", "The temporal frequency of the data (e.g., mon, day).",
-                             indent=indent_amount, vocab=self.cmip6_frequency, required=True)
-                    add_line("Resolution", "100 km", "The nominal resolution of the data (e.g., 100 km).",
-                             indent=indent_amount, vocab=self.cmip6_resolution, required=True)
-                    add_file("Output Dir", str(exe_dir / "CMIP6" / "Download"), "The directory where downloaded NetCDF files will be saved.",
-                             dir_=True, indent=indent_amount, required=True)
-                    add_file("Metadata Dir", str(exe_dir / "Temp"), "The directory where metadata JSON files will be saved.",
-                             dir_=True, indent=indent_amount, required=True)
-                else:  # Advanced
-                    add_line("Activity", "ScenarioMIP", "The CMIP6 activity or program (e.g., ScenarioMIP, CMIP).",
-                             indent=indent_amount, vocab=self.cmip6_activity_id, required=True)
-                    add_line("Experiment", "ssp585", "The experiment identifier (e.g., ssp585, historical).",
-                             indent=indent_amount, vocab=self.cmip6_experiment_id, required=False)
-                    add_line("Variable", "tas", "The climate variable to download (e.g., tas for temperature).",
-                             indent=indent_amount, vocab=self.cmip6_variable_id, required=True)
-                    add_line("Frequency", "mon", "The temporal frequency of the data (e.g., mon, day).",
-                             indent=indent_amount, vocab=self.cmip6_frequency, required=True)
-                    add_line("Model", "", "The climate model/source ID (e.g., CanESM5).",
-                             indent=indent_amount, vocab=self.cmip6_source_id, required=False)
-                    add_line("Resolution", "100 km", "The nominal resolution of the data (e.g., 100 km).",
-                             indent=indent_amount, vocab=self.cmip6_resolution, required=True)
-                    add_line("Ensemble", "r1i1p1f1", "The ensemble member or variant label (e.g., r1i1p1f1).",
-                             indent=indent_amount, vocab=self.cmip6_variant_label, required=False)
-                    add_line("Institution", "", "The institution responsible for the model (e.g., CCCma).",
-                             indent=indent_amount, vocab=self.cmip6_institution_id, required=False)
-                    add_line("Source Type", "", "The type of model (e.g., AOGCM).",
-                             indent=indent_amount, vocab=self.cmip6_source_type, required=False)
-                    add_line("Grid Label", "", "The grid label for the dataset (e.g., gn).",
-                             indent=indent_amount, vocab=self.cmip6_grid_label, required=False)
-                    add_line("Start Date", "", "Filter data starting from this date (format: YYYY-MM-DD).",
-                             indent=indent_amount, required=False)
-                    add_line("End Date", "", "Filter data up to this date (format: YYYY-MM-DD).",
-                             indent=indent_amount, required=False)
-                    add_chk("Latest", True, "If checked, downloads only the latest version of each file.",
-                            indent=indent_amount)
-                    add_line("Extra Params", "", "Additional query parameters in JSON format (e.g., {\"key\": \"value\"}).",
-                             indent=indent_amount, required=False)
-                    add_file("Output Dir", str(exe_dir / "CMIP6" / "Download"), "The directory where downloaded NetCDF files will be saved.",
-                             dir_=True, indent=indent_amount, required=True)
-                    add_file("Metadata Dir", str(exe_dir / "Temp"), "The directory where metadata JSON files will be saved.",
-                             dir_=True, indent=indent_amount, required=True)
-                    add_combo("Save Mode", ["flat", "structured"], "flat", "Choose 'flat' for a single directory or 'structured' for a hierarchical organization.",
-                              indent=indent_amount)
-                    add_line("Max Downloads", "", "The maximum number of files to download (leave blank for no limit).",
-                             indent=indent_amount, required=False)
-
-                    adv_chk = QCheckBox("Show advanced options")
-                    adv_chk.setObjectName("largeCheckbox")
-                    adv_chk.setToolTip("Show additional options for retries, timeouts, and authentication.")
-                    self.form_layout.addRow(mk_label("", indent_amount), adv_chk)
-
-                    adv_widget = QWidget()
-                    adv_layout = QFormLayout(adv_widget)
-                    adv_layout.setContentsMargins(0, 0, 0, 0)
-
-                    retries_le = QLineEdit("3")
-                    retries_le.setToolTip("The number of times to retry a failed download (default: 3).")
-                    adv_layout.addRow(mk_label("Retries", indent_amount), retries_le)
-
-                    timeout_le = QLineEdit("30")
-                    timeout_le.setToolTip("The HTTP request timeout in seconds (default: 30).")
-                    adv_layout.addRow(mk_label("Timeout", indent_amount), timeout_le)
-
-                    no_ssl_ck = QCheckBox()
-                    no_ssl_ck.setObjectName("largeCheckbox")
-                    no_ssl_ck.setChecked(False)
-                    no_ssl_ck.setToolTip("Disable SSL verification for downloads (not recommended).")
-                    adv_layout.addRow(mk_label("No Verify SSL", indent_amount), no_ssl_ck)
-
-                    user_le = QLineEdit("")
-                    user_le.setToolTip("Username for authenticated downloads (if required).")
-                    adv_layout.addRow(mk_label("Username", indent_amount), user_le)
-
-                    pass_le = QLineEdit("")
-                    pass_le.setToolTip("Password for authenticated downloads (if required).")
-                    adv_layout.addRow(mk_label("Password", indent_amount), pass_le)
-
-                    retry_file = QLineEdit("")
-                    retry_file.setToolTip("Path to a file listing failed downloads to retry.")
-                    browse_retry = QPushButton("Browse")
-                    browse_retry.clicked.connect(lambda: self.browse_file(retry_file, False))
-                    retry_wrap = QWidget()
-                    retry_lay = QHBoxLayout(retry_wrap)
-                    retry_lay.setContentsMargins(0, 0, 0, 0)
-                    retry_lay.setSpacing(8)
-                    retry_lay.addWidget(retry_file, 1)
-                    retry_lay.addWidget(browse_retry, 0)
-                    adv_layout.addRow(mk_label("Retry Failed", indent_amount), retry_wrap)
-
-                    adv_widget.setVisible(False)
-                    adv_chk.toggled.connect(adv_widget.setVisible)
-                    self.form_layout.addRow(adv_widget)
-
-                    self.arg_widgets["retries"] = retries_le
-                    self.arg_widgets["timeout"] = timeout_le
-                    self.arg_widgets["no_verify_ssl"] = no_ssl_ck
-                    self.arg_widgets["username"] = user_le
-                    self.arg_widgets["password"] = pass_le
-                    self.arg_widgets["retry_failed"] = retry_file
-
-            elif src == "CMIP5":
-                proj_le = QLineEdit("CMIP5")
-                proj_le.setReadOnly(True)
-                proj_le.setEnabled(False)
-                self.form_layout.addRow(mk_label("Project:", indent_amount), proj_le)
-                self.arg_widgets["project"] = proj_le
-
-                if skill_level == "Beginner":
-                    add_line("Model", "CanESM2", "The CMIP5 model name (e.g., CanESM2).",
-                             indent=indent_amount, vocab=self.cmip5_model, required=True)
-                    add_combo("Variable", COMMON_VARIABLES, "tas", "Select a common climate variable.",
-                              indent=indent_amount)
-                    add_line("Time Frequency", "mon", "The temporal frequency of the data (e.g., mon, day).",
-                             indent=indent_amount, vocab=self.cmip5_time_frequency, required=True)
-                    add_file("Output Dir", str(exe_dir / "CMIP5" / "Download"), "The directory where downloaded NetCDF files will be saved.",
-                             dir_=True, indent=indent_amount, required=True)
-                    add_file("Metadata Dir", str(exe_dir / "Temp"), "The directory where metadata JSON files will be saved.",
-                             dir_=True, indent=indent_amount, required=True)
-                else:  # Advanced
-                    add_line("Model", "CanESM2", "The CMIP5 model name (e.g., CanESM2).",
-                             indent=indent_amount, vocab=self.cmip5_model, required=True)
-                    add_line("Experiment", "historical", "The experiment identifier (e.g., historical, rcp45).",
-                             indent=indent_amount, vocab=self.cmip5_experiment, required=False)
-                    add_line("Variable", "tas", "The climate variable to download (e.g., tas for temperature).",
-                             indent=indent_amount, vocab=self.cmip5_variable, required=True)
-                    add_line("Time Frequency", "mon", "The temporal frequency of the data (e.g., mon, day).",
-                             indent=indent_amount, vocab=self.cmip5_time_frequency, required=True)
-                    add_line("Ensemble", "r1i1p1", "The ensemble member (e.g., r1i1p1).",
-                             indent=indent_amount, vocab=self.cmip5_ensemble, required=False)
-                    add_line("Institute", "", "The institute responsible for the model (e.g., CCCma).",
-                             indent=indent_amount, vocab=self.cmip5_institute, required=False)
-                    add_line("Start Date", "", "Filter data starting from this date (format: YYYY-MM-DD).",
-                             indent=indent_amount, required=False)
-                    add_line("End Date", "", "Filter data up to this date (format: YYYY-MM-DD).",
-                             indent=indent_amount, required=False)
-                    add_chk("Latest", True, "If checked, downloads only the latest version of each file.",
-                            indent=indent_amount)
-                    add_line("Extra Params", "", "Additional query parameters in JSON format (e.g., {\"key\": \"value\"}).",
-                             indent=indent_amount, required=False)
-                    add_file("Output Dir", str(exe_dir / "CMIP5" / "Download"), "The directory where downloaded NetCDF files will be saved.",
-                             dir_=True, indent=indent_amount, required=True)
-                    add_file("Metadata Dir", str(exe_dir / "Temp"), "The directory where metadata JSON files will be saved.",
-                             dir_=True, indent=indent_amount, required=True)
-                    add_combo("Save Mode", ["flat", "structured"], "flat", "Choose 'flat' for a single directory or 'structured' for a hierarchical organization.",
-                              indent=indent_amount)
-                    add_line("Max Downloads", "", "The maximum number of files to download (leave blank for no limit).",
-                             indent=indent_amount, required=False)
-
-                    adv_chk = QCheckBox("Show advanced options")
-                    adv_chk.setObjectName("largeCheckbox")
-                    adv_chk.setToolTip("Show additional options for retries, timeouts, and authentication.")
-                    self.form_layout.addRow(mk_label("", indent_amount), adv_chk)
-
-                    adv_widget = QWidget()
-                    adv_layout = QFormLayout(adv_widget)
-                    adv_layout.setContentsMargins(0, 0, 0, 0)
-
-                    retries_le = QLineEdit("3")
-                    retries_le.setToolTip("The number of times to retry a failed download (default: 3).")
-                    adv_layout.addRow(mk_label("Retries", indent_amount), retries_le)
-
-                    timeout_le = QLineEdit("30")
-                    timeout_le.setToolTip("The HTTP request timeout in seconds (default: 30).")
-                    adv_layout.addRow(mk_label("Timeout", indent_amount), timeout_le)
-
-                    user_le = QLineEdit("")
-                    user_le.setToolTip("Username for authenticated downloads (if required).")
-                    adv_layout.addRow(mk_label("Username", indent_amount), user_le)
-
-                    pass_le = QLineEdit("")
-                    pass_le.setToolTip("Password for authenticated downloads (if required).")
-                    adv_layout.addRow(mk_label("Password", indent_amount), pass_le)
-
-                    openid_le = QLineEdit("")
-                    openid_le.setToolTip("OpenID URL for CMIP5 authentication (if required).")
-                    adv_layout.addRow(mk_label("OpenID", indent_amount), openid_le)
-
-                    no_ssl_ck = QCheckBox()
-                    no_ssl_ck.setObjectName("largeCheckbox")
-                    no_ssl_ck.setChecked(False)
-                    no_ssl_ck.setToolTip("Disable SSL verification for downloads (not recommended).")
-                    adv_layout.addRow(mk_label("No Verify SSL", indent_amount), no_ssl_ck)
-
-                    retry_file = QLineEdit("")
-                    retry_file.setToolTip("Path to a file listing failed downloads to retry.")
-                    browse_retry = QPushButton("Browse")
-                    browse_retry.clicked.connect(lambda: self.browse_file(retry_file, False))
-                    retry_wrap = QWidget()
-                    retry_lay = QHBoxLayout(retry_wrap)
-                    retry_lay.setContentsMargins(0, 0, 0, 0)
-                    retry_lay.setSpacing(8)
-                    retry_lay.addWidget(retry_file, 1)
-                    retry_lay.addWidget(browse_retry, 0)
-                    adv_layout.addRow(mk_label("Retry Failed", indent_amount), retry_wrap)
-
-                    adv_widget.setVisible(False)
-                    adv_chk.toggled.connect(adv_widget.setVisible)
-                    self.form_layout.addRow(adv_widget)
-
-                    self.arg_widgets["retries"] = retries_le
-                    self.arg_widgets["timeout"] = timeout_le
-                    self.arg_widgets["username"] = user_le
-                    self.arg_widgets["password"] = pass_le
-                    self.arg_widgets["openid"] = openid_le
-                    self.arg_widgets["no_verify_ssl"] = no_ssl_ck
-                    self.arg_widgets["retry_failed"] = retry_file
-
-            else:  # PRISM
-                add_combo("Variable", ["ppt", "tmax", "tmin", "tmean", "tdmean", "vpdmin", "vpdmax"], "tmean",
-                          "The PRISM climate variable (e.g., tmean for mean temperature).", indent=indent_amount)
-                add_combo("Resolution", ["4km", "800m"], "4km", "The spatial resolution of PRISM data (4km or 800m).",
-                          indent=indent_amount)
-                add_combo("Time Step", ["daily", "monthly"], "daily", "The temporal resolution (daily or monthly).",
-                          indent=indent_amount)
-                add_line("Start Date", "2020-01-01", "The start date for PRISM data (format: YYYY-MM-DD or YYYY-MM).",
-                         indent=indent_amount, required=True)
-                add_line("End Date", "2020-01-04", "The end date for PRISM data (format: YYYY-MM-DD or YYYY-MM).",
-                         indent=indent_amount, required=True)
-                add_file("Output Dir", "prism_data", "The directory where downloaded PRISM files will be saved.",
-                         dir_=True, indent=indent_amount, required=True)
-                add_file("Metadata Dir", "metadata", "The directory where PRISM metadata files will be saved.",
-                         dir_=True, indent=indent_amount, required=True)
-                add_line("Retries", "3", "The number of times to retry a failed download (default: 3).",
-                         indent=indent_amount, required=False)
-                add_line("Timeout", "30", "The HTTP request timeout in seconds (default: 30).",
-                         indent=indent_amount, required=False)
-
-        elif process == "Spatial Crop":
-            add_file("Input Dir", "cmip6_data", "The directory containing NetCDF files to crop.",
-                     dir_=True, required=True)
-            add_file("Output Dir", "cmip6_cropped_data", "The directory to save cropped NetCDF files.",
-                     dir_=True, required=True)
-            add_line("Min Lat", "35.0", "The minimum latitude for cropping (degrees).", required=True)
-            add_line("Max Lat", "45.0", "The maximum latitude for cropping (degrees).", required=True)
-            add_line("Min Lon", "-105.0", "The minimum longitude for cropping (degrees).", required=True)
-            add_line("Max Lon", "-95.0", "The maximum longitude for cropping (degrees).", required=True)
-            add_line("Buffer KM", "50.0", "The buffer distance in kilometers to add around the bounding box (optional).",
-                     required=False)
-
-        elif process == "Spatial Clip":
-            add_file("Input Dir", "cmip6_data", "The directory containing NetCDF files to clip.",
-                     dir_=True, required=True)
-            add_file("Shapefile Path", "", "The path to a shapefile (.shp) defining the clipping boundary.",
-                     dir_=False, required=True)
-            add_line("Buffer KM", "20.0", "The buffer distance in kilometers to add around the shapefile (optional).",
-                     required=False)
-            add_file("Output Dir", "cmip6_clipped_data", "The directory to save clipped NetCDF files.",
-                     dir_=True, required=True)
-
-        elif process == "Catalog Build":
-            add_file("Input Dir", "cmip6_data", "The directory containing NetCDF files to include in the catalog.",
-                     dir_=True, required=True)
-            add_file("Output Dir", "catalog", "The directory to save the generated catalog JSON file.",
-                     dir_=True, required=True)
-
-        if is_first_run() and process == self.proc_combo.currentText():
             if process == "Download":
                 if src == "CMIP6":
-                    pass  # No max_downloads set
+                    # Required Fields
+                    proj_le = QLineEdit("CMIP6")
+                    proj_le.setReadOnly(True)
+                    proj_le.setEnabled(False)
+                    self.form_layout.addRow(mk_label("Project", indent_amount, required=True), proj_le)
+                    self.arg_widgets["project"] = proj_le
+
+                    add_line("Activity", "ScenarioMIP", "The CMIP6 activity or program (e.g., ScenarioMIP, CMIP).",
+                            indent=indent_amount, vocab=self.cmip6_activity_id, required=True)
+                    
+                    if skill_level == "Beginner":
+                        add_combo("Variable", COMMON_VARIABLES, "tas", "Select a common climate variable.",
+                                indent=indent_amount)
+                    else:
+                        add_line("Variable", "tas", "The climate variable to download (e.g., tas for temperature).",
+                                indent=indent_amount, vocab=self.cmip6_variable_id, required=True)
+
+                    add_line("Frequency", "mon", "The temporal frequency of the data (e.g., mon, day).",
+                            indent=indent_amount, vocab=self.cmip6_frequency, required=True)
+                    add_line("Resolution", "100 km", "The nominal resolution of the data (e.g., 100 km).",
+                            indent=indent_amount, vocab=self.cmip6_resolution, required=True)
+                    add_file("Output", "./Output", "The directory where downloaded NetCDF files will be saved.",
+                            dir_=True, indent=indent_amount, required=True)
+                    add_file("Metadata", "./Metadata", "The directory where metadata JSON files will be saved.",
+                            dir_=True, indent=indent_amount, required=True)
+                    add_file("Logs", "./Logs", "The directory where log files will be saved.",
+                            dir_=True, indent=indent_amount, required=True)
+
+                    # Optional Fields (Advanced mode only)
+                    if skill_level == "Advanced":
+                        add_line("Experiment", "ssp585", "The experiment identifier (e.g., ssp585, historical).",
+                                indent=indent_amount, vocab=self.cmip6_experiment_id)
+                        add_line("Model", "", "The climate model/source ID (e.g., CanESM5).",
+                                indent=indent_amount, vocab=self.cmip6_source_id)
+                        add_line("Ensemble", "r1i1p1f1", "The ensemble member or variant label (e.g., r1i1p1f1).",
+                                indent=indent_amount, vocab=self.cmip6_variant_label)
+                        add_line("Institution", "", "The institution responsible for the model (e.g., CCCma).",
+                                indent=indent_amount, vocab=self.cmip6_institution_id)
+                        add_line("Source Type", "", "The type of model (e.g., AOGCM).",
+                                indent=indent_amount, vocab=self.cmip6_source_type)
+                        add_line("Grid Label", "", "The grid label for the dataset (e.g., gn).",
+                                indent=indent_amount, vocab=self.cmip6_grid_label)
+                        add_line("Start Date", "", "Filter data starting from this date (format: YYYY-MM-DD).",
+                                indent=indent_amount)
+                        add_line("End Date", "", "Filter data up to this date (format: YYYY-MM-DD).",
+                                indent=indent_amount)
+                        add_chk("Latest", True, "If checked, downloads only the latest version of each file.",
+                                indent=indent_amount)
+                        add_line("Extra Params", "", "Additional query parameters in JSON format (e.g., {\"key\": \"value\"}).",
+                                indent=indent_amount)
+                        add_combo("Save Mode", ["flat", "structured"], "flat", "Choose 'flat' for a single directory or 'structured' for a hierarchical organization.",
+                                indent=indent_amount)
+                        add_line("Max Downloads", "", "The maximum number of files to download (leave blank for no limit).",
+                                indent=indent_amount)
+
+                        adv_chk = QCheckBox("Show advanced options")
+                        adv_chk.setObjectName("largeCheckbox")
+                        adv_chk.setToolTip("Show additional options for retries, timeouts, and authentication.")
+                        self.form_layout.addRow(mk_label("", indent_amount), adv_chk)
+
+                        adv_widget = QWidget()
+                        adv_layout = QFormLayout(adv_widget)
+                        adv_layout.setContentsMargins(0, 0, 0, 0)
+
+                        retries_le = QLineEdit("3")
+                        retries_le.setToolTip("The number of times to retry a failed download (default: 3).")
+                        adv_layout.addRow(mk_label("Retries", indent_amount), retries_le)
+
+                        timeout_le = QLineEdit("30")
+                        timeout_le.setToolTip("The HTTP request timeout in seconds (default: 30).")
+                        adv_layout.addRow(mk_label("Timeout", indent_amount), timeout_le)
+
+                        no_ssl_ck = QCheckBox()
+                        no_ssl_ck.setObjectName("largeCheckbox")
+                        no_ssl_ck.setChecked(False)
+                        no_ssl_ck.setToolTip("Disable SSL verification for downloads (not recommended).")
+                        adv_layout.addRow(mk_label("No Verify SSL", indent_amount), no_ssl_ck)
+
+                        user_le = QLineEdit("")
+                        user_le.setToolTip("Username for authenticated downloads (if required).")
+                        adv_layout.addRow(mk_label("Username", indent_amount), user_le)
+
+                        pass_le = QLineEdit("")
+                        pass_le.setToolTip("Password for authenticated downloads (if required).")
+                        adv_layout.addRow(mk_label("Password", indent_amount), pass_le)
+
+                        retry_file = QLineEdit("")
+                        retry_file.setToolTip("Path to a '.json' file listing failed downloads to retry.")
+                        browse_retry = QPushButton("Browse")
+                        browse_retry.clicked.connect(lambda: self.browse_file(retry_file, False))
+                        retry_wrap = QWidget()
+                        retry_lay = QHBoxLayout(retry_wrap)
+                        retry_lay.setContentsMargins(0, 0, 0, 0)
+                        retry_lay.setSpacing(8)
+                        retry_lay.addWidget(retry_file, 1)
+                        retry_lay.addWidget(browse_retry, 0)
+                        adv_layout.addRow(mk_label("Retry Failed", indent_amount), retry_wrap)
+
+                        adv_widget.setVisible(False)
+                        adv_chk.toggled.connect(adv_widget.setVisible)
+                        self.form_layout.addRow(adv_widget)
+
+                        self.arg_widgets["retries"] = retries_le
+                        self.arg_widgets["timeout"] = timeout_le
+                        self.arg_widgets["no_verify_ssl"] = no_ssl_ck
+                        self.arg_widgets["username"] = user_le
+                        self.arg_widgets["password"] = pass_le
+                        self.arg_widgets["retry_failed"] = retry_file
+
                 elif src == "CMIP5":
-                    pass  # No max_downloads set
-                elif src == "PRISM":
-                    self.arg_widgets["variable"].setCurrentText("tmean")
-                    self.arg_widgets["resolution"].setCurrentText("4km")
-                    self.arg_widgets["time_step"].setCurrentText("monthly")
-                    self.arg_widgets["start_date"].setText("2020-01")
-                    self.arg_widgets["end_date"].setText("2020-03")
+                    # Required Fields
+                    proj_le = QLineEdit("CMIP5")
+                    proj_le.setReadOnly(True)
+                    proj_le.setEnabled(False)
+                    self.form_layout.addRow(mk_label("Project", indent_amount, required=True), proj_le)
+                    self.arg_widgets["project"] = proj_le
+
+                    if skill_level == "Beginner":
+                        add_combo("Variable", COMMON_VARIABLES, "tas", "Select a common climate variable.",
+                                indent=indent_amount)
+                    else:
+                        add_line("Variable", "tas", "The climate variable to download (e.g., tas for temperature).",
+                                indent=indent_amount, vocab=self.cmip5_variable, required=True)
+
+                    add_line("Frequency", "mon", "The temporal frequency of the data (e.g., mon, day).",
+                            indent=indent_amount, vocab=self.cmip5_time_frequency, required=True)
+                    add_line("Model", "CanESM2", "The CMIP5 model name (e.g., CanESM2).",
+                            indent=indent_amount, vocab=self.cmip5_model, required=True)
+                    add_file("Output", "./Output", "The directory where downloaded NetCDF files will be saved.",
+                            dir_=True, indent=indent_amount, required=True)
+                    add_file("Metadata", "./Metadata", "The directory where metadata JSON files will be saved.",
+                            dir_=True, indent=indent_amount, required=True)
+                    add_file("Logs", "./Logs", "The directory where log files will be saved.",
+                            dir_=True, indent=indent_amount, required=True)
+
+                    # Optional Fields (Advanced mode only)
+                    if skill_level == "Advanced":
+                        add_line("Experiment", "historical", "The experiment identifier (e.g., historical, rcp45).",
+                                indent=indent_amount, vocab=self.cmip5_experiment)
+                        add_line("Ensemble", "r1i1p1", "The ensemble member (e.g., r1i1p1).",
+                                indent=indent_amount, vocab=self.cmip5_ensemble)
+                        add_line("Institute", "", "The institute responsible for the model (e.g., CCCma).",
+                                indent=indent_amount, vocab=self.cmip5_institute)
+                        add_line("Start Date", "", "Filter data starting from this date (format: YYYY-MM-DD).",
+                                indent=indent_amount)
+                        add_line("End Date", "", "Filter data up to this date (format: YYYY-MM-DD).",
+                                indent=indent_amount)
+                        add_chk("Latest", True, "If checked, downloads only the latest version of each file.",
+                                indent=indent_amount)
+                        add_line("Extra Params", "", "Additional query parameters in JSON format (e.g., {\"key\": \"value\"}).",
+                                indent=indent_amount)
+                        add_combo("Save Mode", ["flat", "structured"], "flat", "Choose 'flat' for a single directory or 'structured' for a hierarchical organization.",
+                                indent=indent_amount)
+                        add_line("Max Downloads", "", "The maximum number of files to download (leave blank for no limit).",
+                                indent=indent_amount)
+
+                        adv_chk = QCheckBox("Show advanced options")
+                        adv_chk.setObjectName("largeCheckbox")
+                        adv_chk.setToolTip("Show additional options for retries, timeouts, and authentication.")
+                        self.form_layout.addRow(mk_label("", indent_amount), adv_chk)
+
+                        adv_widget = QWidget()
+                        adv_layout = QFormLayout(adv_widget)
+                        adv_layout.setContentsMargins(0, 0, 0, 0)
+
+                        retries_le = QLineEdit("3")
+                        retries_le.setToolTip("The number of times to retry a failed download (default: 3).")
+                        adv_layout.addRow(mk_label("Retries", indent_amount), retries_le)
+
+                        timeout_le = QLineEdit("30")
+                        timeout_le.setToolTip("The HTTP request timeout in seconds (default: 30).")
+                        adv_layout.addRow(mk_label("Timeout", indent_amount), timeout_le)
+
+                        user_le = QLineEdit("")
+                        user_le.setToolTip("Username for authenticated downloads (if required).")
+                        adv_layout.addRow(mk_label("Username", indent_amount), user_le)
+
+                        pass_le = QLineEdit("")
+                        pass_le.setToolTip("Password for authenticated downloads (if required).")
+                        adv_layout.addRow(mk_label("Password", indent_amount), pass_le)
+
+                        openid_le = QLineEdit("")
+                        openid_le.setToolTip("OpenID URL for CMIP5 authentication (if required).")
+                        adv_layout.addRow(mk_label("OpenID", indent_amount), openid_le)
+
+                        no_ssl_ck = QCheckBox()
+                        no_ssl_ck.setObjectName("largeCheckbox")
+                        no_ssl_ck.setChecked(False)
+                        no_ssl_ck.setToolTip("Disable SSL verification for downloads (not recommended).")
+                        adv_layout.addRow(mk_label("No Verify SSL", indent_amount), no_ssl_ck)
+
+                        retry_file = QLineEdit("")
+                        retry_file.setToolTip("Path to a '.json' file listing failed downloads to retry.")
+                        browse_retry = QPushButton("Browse")
+                        browse_retry.clicked.connect(lambda: self.browse_file(retry_file, False))
+                        retry_wrap = QWidget()
+                        retry_lay = QHBoxLayout(retry_wrap)
+                        retry_lay.setContentsMargins(0, 0, 0, 0)
+                        retry_lay.setSpacing(8)
+                        retry_lay.addWidget(retry_file, 1)
+                        retry_lay.addWidget(browse_retry, 0)
+                        adv_layout.addRow(mk_label("Retry Failed", indent_amount), retry_wrap)
+
+                        adv_widget.setVisible(False)
+                        adv_chk.toggled.connect(adv_widget.setVisible)
+                        self.form_layout.addRow(adv_widget)
+
+                        self.arg_widgets["retries"] = retries_le
+                        self.arg_widgets["timeout"] = timeout_le
+                        self.arg_widgets["username"] = user_le
+                        self.arg_widgets["password"] = pass_le
+                        self.arg_widgets["openid"] = openid_le
+                        self.arg_widgets["no_verify_ssl"] = no_ssl_ck
+                        self.arg_widgets["retry_failed"] = retry_file
+
+                else:  # PRISM
+                    # Required Fields
+                    add_combo("Variable", ["ppt", "tmax", "tmin", "tmean", "tdmean", "vpdmin", "vpdmax"], "tmean",
+                            "The PRISM climate variable (e.g., tmean for mean temperature).", indent=indent_amount)
+                    add_combo("Resolution", ["4km", "800m"], "4km", "The spatial resolution of PRISM data (4km or 800m).",
+                            indent=indent_amount)
+                    add_combo("Time Step", ["daily", "monthly"], "daily", "The temporal resolution (daily or monthly).",
+                            indent=indent_amount)
+                    add_line("Start Date", "2020-01-01", "The start date for PRISM data (format: YYYY-MM-DD or YYYY-MM).",
+                            indent=indent_amount, required=True)
+                    add_line("End Date", "2020-01-04", "The end date for PRISM data (format: YYYY-MM-DD or YYYY-MM).",
+                            indent=indent_amount, required=True)
+                    add_file("Output", "./Output", "The directory where downloaded PRISM files will be saved.",
+                            dir_=True, indent=indent_amount, required=True)
+                    add_file("Metadata", "./Metadata", "The directory where PRISM metadata files will be saved.",
+                            dir_=True, indent=indent_amount, required=True)
+                    add_file("Logs", "./Logs", "The directory where log files will be saved.",
+                            dir_=True, indent=indent_amount, required=True)
+
+                    # Optional Fields
+                    add_line("Retries", "3", "The number of times to retry a failed download (default: 3).",
+                            indent=indent_amount)
+                    add_line("Timeout", "30", "The HTTP request timeout in seconds (default: 30).",
+                            indent=indent_amount)
+
             elif process == "Spatial Crop":
-                self.arg_widgets["min_lat"].setText("35.0")
-                self.arg_widgets["max_lat"].setText("45.0")
-                self.arg_widgets["min_lon"].setText("-105.0")
-                self.arg_widgets["max_lon"].setText("-95.0")
-                self.arg_widgets["buffer_km"].setText("50.0")
+                # Required Fields
+                add_file("Input", "./Output", "The directory containing NetCDF files to crop.",
+                        dir_=True, indent=indent_amount, required=True)
+                add_file("Output", "./Output/Cropped", "The directory to save cropped NetCDF files.",
+                        dir_=True, indent=indent_amount, required=True)
+                add_file("Logs", "./Logs", "The directory where log files will be saved.",
+                        dir_=True, indent=indent_amount, required=True)
+                add_line("Min Lat", "35.0", "The minimum latitude for cropping (degrees).",
+                        indent=indent_amount, required=True)
+                add_line("Max Lat", "45.0", "The maximum latitude for cropping (degrees).",
+                        indent=indent_amount, required=True)
+                add_line("Min Lon", "-105.0", "The minimum longitude for cropping (degrees).",
+                        indent=indent_amount, required=True)
+                add_line("Max Lon", "-95.0", "The maximum longitude for cropping (degrees).",
+                        indent=indent_amount, required=True)
+
+                # Optional Fields
+                add_line("Buffer KM", "50.0", "The buffer distance in kilometers to add around the bounding box.",
+                        indent=indent_amount)
+
             elif process == "Spatial Clip":
-                self.arg_widgets["shapefile_path"].setText("shapefiles/iowa_border/iowa_border.shp")
-                self.arg_widgets["buffer_km"].setText("20.0")
+                # Required Fields
+                add_file("Input", "./Output", "The directory containing NetCDF files to clip.",
+                        dir_=True, indent=indent_amount, required=True)
+                add_file("Shapefile", "", "The path to a shapefile (.shp) defining the clipping boundary.",
+                        dir_=False, indent=indent_amount, required=True)
+                add_file("Output", "./Output/Clipped", "The directory to save clipped NetCDF files.",
+                        dir_=True, indent=indent_amount, required=True)
+                add_file("Logs", "./Logs", "The directory where log files will be saved.",
+                        dir_=True, indent=indent_amount, required=True)
+
+                # Optional Fields
+                add_line("Buffer KM", "20.0", "The buffer distance in kilometers to add around the shapefile.",
+                        indent=indent_amount)
+
             elif process == "Catalog Build":
-                self.arg_widgets["input_dir"].setText("cmip6_data")
-                self.arg_widgets["output_dir"].setText("metadata")
+                # Required Fields
+                add_file("Input", "./Output", "The directory containing NetCDF files to include in the catalog.",
+                        dir_=True, indent=indent_amount, required=True)
+                add_file("Output", "./Metadata", "The directory to save the generated catalog JSON file.",
+                        dir_=True, indent=indent_amount, required=True)
+                add_file("Logs", "./Logs", "The directory where log files will be saved.",
+                        dir_=True, indent=indent_amount, required=True)
+
+            if is_first_run() and process == self.proc_combo.currentText():
+                if process == "Download":
+                    if src == "CMIP6":
+                        pass
+                    elif src == "CMIP5":
+                        pass
+                    elif src == "PRISM":
+                        self.arg_widgets["variable"].setCurrentText("tmean")
+                        self.arg_widgets["resolution"].setCurrentText("4km")
+                        self.arg_widgets["time_step"].setCurrentText("monthly")
+                        self.arg_widgets["start_date"].setText("2020-01")
+                        self.arg_widgets["end_date"].setText("2020-03")
+                elif process == "Spatial Crop":
+                    self.arg_widgets["min_lat"].setText("35.0")
+                    self.arg_widgets["max_lat"].setText("45.0")
+                    self.arg_widgets["min_lon"].setText("-105.0")
+                    self.arg_widgets["max_lon"].setText("-95.0")
+                    self.arg_widgets["buffer_km"].setText("50.0")
+                elif process == "Spatial Clip":
+                    self.arg_widgets["shapefile_path"].setText("shapefiles/iowa_border/iowa_border.shp")
+                    self.arg_widgets["buffer_km"].setText("20.0")
+                elif process == "Catalog Build":
+                    self.arg_widgets["input_dir"].setText("./Output")
+                    self.arg_widgets["output_dir"].setText("./Metadata")
 
     def set_theme(self, name: str, checked: bool = True):
         self.current_theme = name.lower()
