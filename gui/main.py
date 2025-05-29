@@ -338,7 +338,7 @@ ABOUT_DIALOG_HTML = (
     "<p>Copyright © 2025 Bhuwan Shah<br>"
     "Released under the AGPL-v3 licence.</p>"
     "<p><b>GitHub:</b> <a href='https://github.com/shahbhuwan'>https://github.com/shahbhuwan/GridFlow</a><br>"
-    "<b>Email:</b> <a href='mailto:your.email@example.com'>your.email@example.com</a></p>"
+    "<b>Email:</b> <a href='mailto:bshah@iastate.edu'>bshah@iastate.edu</a></p>"
 )
 LABEL_COL = 120
 COMMON_VARIABLES = ["pr", "tas", "tasmax", "tasmin", "hurs", "huss"]
@@ -677,15 +677,15 @@ class GridFlowGUI(QMainWindow):
         command_layout.setSpacing(6)
 
         fm = QFontMetrics(self.font())  
-        min_height = fm.height() * 2
+        min_height = fm.height() * 2.2
 
         self.command_display = QTextEdit()
         self.command_display.setReadOnly(True)
-        self.command_display.setWordWrapMode(QtGui.QTextOption.NoWrap)
+        self.command_display.setWordWrapMode(QtGui.QTextOption.WrapAtWordBoundaryOrAnywhere)
         self.command_display.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
         self.command_display.setMinimumHeight(min_height)
-        self.command_display.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.command_display.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.command_display.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.command_display.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.command_display.setVisible(False)
         self.command_display.setStyleSheet("""
             QTextEdit {
@@ -698,13 +698,6 @@ class GridFlowGUI(QMainWindow):
             }
         """)
         command_layout.addWidget(self.command_display, 1)
-
-        def wheelEvent(evt):
-            delta = evt.angleDelta().y()
-            if delta:
-                sb = self.command_display.horizontalScrollBar()
-                sb.setValue(sb.value() - delta)
-        self.command_display.wheelEvent = wheelEvent
 
         self.copy_button = QPushButton("Copy Command")
         self.copy_button.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Minimum)
@@ -925,7 +918,7 @@ class GridFlowGUI(QMainWindow):
                                 indent=indent_amount)
                         add_line("Extra Params", "", "Additional query parameters in JSON format (e.g., {\"key\": \"value\"}).",
                                 indent=indent_amount)
-                        add_combo("Save Mode", ["flat", "structured"], "flat", "Choose 'flat' for a single directory or 'structured' for a hierarchical organization.",
+                        add_combo("Save Mode", ["Flat", "Structured"], "Flat", "Choose 'Flat' for a single directory or 'Structured' for a hierarchical organization.",
                                 indent=indent_amount)
                         add_line("Max Downloads", "", "The maximum number of files to download (leave blank for no limit).",
                                 indent=indent_amount)
@@ -1026,7 +1019,7 @@ class GridFlowGUI(QMainWindow):
                                 indent=indent_amount)
                         add_line("Extra Params", "", "Additional query parameters in JSON format (e.g., {\"key\": \"value\"}).",
                                 indent=indent_amount)
-                        add_combo("Save Mode", ["flat", "structured"], "flat", "Choose 'flat' for a single directory or 'structured' for a hierarchical organization.",
+                        add_combo("Save Mode", ["Flat", "Structured"], "Flat", "Choose 'Flat' for a single directory or 'Structured' for a hierarchical organization.",
                                 indent=indent_amount)
                         add_line("Max Downloads", "", "The maximum number of files to download (leave blank for no limit).",
                                 indent=indent_amount)
@@ -1213,6 +1206,7 @@ class GridFlowGUI(QMainWindow):
         if p:
             line_edit.setText(p)
 
+# Replace the entire start_task method (lines ~980-1095) with:
     def start_task(self) -> None:
         if self.worker_thread and self.worker_thread.isRunning():
             self.log_text.append("❗ A task is already running")
@@ -1252,7 +1246,7 @@ class GridFlowGUI(QMainWindow):
             args_dict["password"] = args_dict.pop("password", None)
             if self.src_combo.currentText() == "CMIP5":
                 args_dict["openid"] = args_dict.pop("open_id", None)
-                args_dict["time_frequency"] = args_dict.pop("time_frequency", None)
+                args_dict["time_frequency"] = args_dict.pop("frequency", None)
             if not any([args_dict["id"], args_dict["password"], args_dict.get("openid", None)]):
                 project = self.src_combo.currentText()
                 resp = QMessageBox.warning(
@@ -1270,6 +1264,14 @@ class GridFlowGUI(QMainWindow):
                 if not args_dict.get(field):
                     self.log_text.append(f"❗ {field.title()} is required for CMIP6 Download")
                     return
+            # Ensure optional fields are set to None if not provided
+            optional_fields = [
+                "experiment", "model", "ensemble", "institution", "source_type", "grid_label",
+                "start_date", "end_date", "extra_params", "max_downloads", "retries", "timeout",
+                "username", "password", "retry_failed", "save_mode", "latest", "no_verify_ssl"
+            ]
+            for field in optional_fields:
+                args_dict.setdefault(field, None)
 
         if self.src_combo.currentText() == "CMIP5" and self.proc_combo.currentText() == "Download":
             required_fields = ["project", "model", "variable", "time_frequency"]
@@ -1277,6 +1279,14 @@ class GridFlowGUI(QMainWindow):
                 if not args_dict.get(field):
                     self.log_text.append(f"❗ {field.title()} is required for CMIP5 Download")
                     return
+            # Ensure optional fields are set to None if not provided
+            optional_fields = [
+                "experiment", "ensemble", "institute", "start_date", "end_date", "extra_params",
+                "max_downloads", "retries", "timeout", "username", "password", "openid",
+                "retry_failed", "save_mode", "latest", "no_verify_ssl"
+            ]
+            for field in optional_fields:
+                args_dict.setdefault(field, None)
 
         if self.src_combo.currentText() == "PRISM" and self.proc_combo.currentText() == "Download":
             if not args_dict.get("start_date") or not args_dict.get("end_date"):
@@ -1293,14 +1303,14 @@ class GridFlowGUI(QMainWindow):
                     return
 
         if self.proc_combo.currentText() == "Spatial Clip" and not args_dict.get("demo"):
-            if not args_dict.get("shapefile_path"):
+            if not args_dict.get("shapefile"):
                 self.log_text.append("❗ Shapefile Path is required for Spatial Clip unless in demo mode")
                 return
 
         if self.proc_combo.currentText() == "Catalog Build":
-            for field in ["input_dir", "output_dir"]:
+            for field in ["input", "output"]:
                 if not args_dict.get(field):
-                    self.log_text.append(f"❗ {field.replace('_', ' ').title()} is required for Catalog Build")
+                    self.log_text.append(f"❗ {field.replace('_', ' ').title()} Dir is required for Catalog Build")
                     return
 
         args_dict["workers"] = args_dict.get("workers", self.workers_edit.text().strip())
@@ -1320,8 +1330,8 @@ class GridFlowGUI(QMainWindow):
         args_dict["openid"] = args_dict.get("openid", None)
         args_dict["no_verify_ssl"] = args_dict.get("no_verify_ssl", False)
         args_dict["retry_failed"] = args_dict.get("retry_failed", None)
-        args_dict["output_dir"] = args_dict.get("output_dir", None)
-        args_dict["metadata_dir"] = args_dict.get("metadata_dir", None)
+        args_dict["output_dir"] = args_dict.get("output", "./Output")  # Map 'output' to 'output_dir'
+        args_dict["metadata_dir"] = args_dict.get("metadata", "./Metadata")  # Map 'metadata' to 'metadata_dir'
         args_dict["save_mode"] = args_dict.get("save_mode", "flat")
         args_dict["latest"] = args_dict.get("latest", True)
         args_dict["extra_params"] = args_dict.get("extra_params", None)
@@ -1342,7 +1352,7 @@ class GridFlowGUI(QMainWindow):
             if src in ["CMIP6", "CMIP5"]:
                 for key in ["project", "activity", "experiment", "variable", "frequency", "model", "resolution",
                             "ensemble", "institution", "source_type", "grid_label", "start_date", "end_date",
-                            "extra_params", "output_dir", "metadata_dir", "save_mode", "max_downloads", "retries",
+                            "extra_params", "output", "metadata", "save_mode", "max_downloads", "retries",
                             "timeout", "id", "password", "openid", "retry_failed"]:
                     if key in args_dict and args_dict[key]:
                         command_parts.append(f"--{key.replace('_', '-')} \"{args_dict[key]}\"")
@@ -1351,20 +1361,20 @@ class GridFlowGUI(QMainWindow):
                 if args_dict.get("no_verify_ssl"):
                     command_parts.append("--no-verify-ssl")
             else:  # PRISM
-                for key in ["variable", "resolution", "time_step", "start_date", "end_date", "output_dir",
-                            "metadata_dir", "retries", "timeout"]:
+                for key in ["variable", "resolution", "time_step", "start_date", "end_date", "output",
+                            "metadata", "retries", "timeout"]:
                     if key in args_dict and args_dict[key]:
                         command_parts.append(f"--{key.replace('_', '-')} \"{args_dict[key]}\"")
         elif proc == "Spatial Crop":
-            for key in ["input_dir", "output_dir", "min_lat", "max_lat", "min_lon", "max_lon", "buffer_km"]:
+            for key in ["input", "output", "min_lat", "max_lat", "min_lon", "max_lon", "buffer_km"]:
                 if key in args_dict and args_dict[key]:
                     command_parts.append(f"--{key.replace('_', '-')} \"{args_dict[key]}\"")
         elif proc == "Spatial Clip":
-            for key in ["input_dir", "shapefile_path", "buffer_km", "output_dir"]:
+            for key in ["input", "shapefile", "buffer_km", "output"]:
                 if key in args_dict and args_dict[key]:
                     command_parts.append(f"--{key.replace('_', '-')} \"{args_dict[key]}\"")
         elif proc == "Catalog Build":
-            for key in ["input_dir", "output_dir"]:
+            for key in ["input", "output"]:
                 if key in args_dict and args_dict[key]:
                     command_parts.append(f"--{key.replace('_', '-')} \"{args_dict[key]}\"")
 
@@ -1375,14 +1385,10 @@ class GridFlowGUI(QMainWindow):
 
         command_str = " ".join(command_parts)
 
-        if self.skill_combo.currentText() == "Advanced":
-            self.command_display.setText(f"Running: {command_str}")
-            self.command_display.setStyleSheet("font-size: 12pt; font-weight: bold; color: #ffffff; background: #4a90e2; padding: 8px; border-radius: 4px; border: none;")
-            self.command_display.setVisible(True)
-            self.copy_button.setVisible(True)
-        else:
-            self.command_display.setVisible(False)
-            self.copy_button.setVisible(False)
+        self.command_display.setText(f"Running: {command_str}")
+        self.command_display.setStyleSheet("font-size: 12pt; font-weight: bold; color: #ffffff; background: #4a90e2; padding: 8px; border-radius: 4px; border: none;")
+        self.command_display.setVisible(True)
+        self.copy_button.setVisible(True)
 
         class _Args:
             def __init__(self, **kw):
