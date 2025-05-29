@@ -3,25 +3,29 @@ AppName=GridFlow
 AppVersion=1.0
 AppPublisher=Bhuwan Shah
 AppCopyright=Copyright (C) 2025 Bhuwan Shah
-DefaultDirName={autopf}\GridFlow
+DefaultDirName={localappdata}\Programs\GridFlow
 DefaultGroupName=GridFlow
-OutputDir=D:\GUI\gridflow\dist
+OutputDir=dist
 OutputBaseFilename=GridFlowGUI_Setup
-SetupIconFile=D:\GUI\gridflow\gridflow_logo.ico
-LicenseFile=D:\GUI\gridflow\LICENSE.txt
+SetupIconFile=gridflow_logo.ico
+LicenseFile=LICENSE.txt
 Compression=lzma
 SolidCompression=yes
 WizardStyle=modern
 UninstallDisplayName=GridFlow
-UninstallDisplayIcon={app}\GridFlowGUI.exe
+UninstallDisplayIcon={app}\gridflow.exe
+PrivilegesRequired=lowest
+PrivilegesRequiredOverridesAllowed=dialog
 
 [Files]
-Source: "D:\GUI\gridflow\dist\GridFlowGUI\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "dist\gridflow\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "gridflow_logo.ico"; DestDir: "{app}"; Flags: ignoreversion
+Source: "LICENSE.txt"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
-Name: "{autodesktop}\GridFlow"; Filename: "{app}\GridFlowGUI.exe"; IconFilename: "{app}\gridflow_logo.ico"
-Name: "{group}\GridFlow"; Filename: "{app}\GridFlowGUI.exe"; IconFilename: "{app}\gridflow_logo.ico"
-Name: "{group}\{cm:UninstallProgram,GridFlow}"; Filename: "{uninstallexe}"
+Name: "{userdesktop}\GridFlow"; Filename: "{app}\gridflow.exe"; IconFilename: "{app}\gridflow_logo.ico"
+Name: "{userstartmenu}\GridFlow"; Filename: "{app}\gridflow.exe"; IconFilename: "{app}\gridflow_logo.ico"
+Name: "{userstartmenu}\{cm:UninstallProgram,GridFlow}"; Filename: "{uninstallexe}"
 
 [Run]
-Filename: "{app}\GridFlowGUI.exe"; Description: "{cm:LaunchProgram,GridFlow}"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\gridflow.exe"; Description: "{cm:LaunchProgram,GridFlow}"; Flags: nowait postinstall skipifsilent
