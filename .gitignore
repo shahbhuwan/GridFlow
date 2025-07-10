@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+
+# Log files
+gridflow_logs/
+*.log
+
+# Virtual Environments
+venv/
+.venv/
+env/
+test-env/
+
+# IDE / Editor specific
+.vscode/
+.idea/

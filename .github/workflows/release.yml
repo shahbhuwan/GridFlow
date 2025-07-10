@@ -1,0 +1,92 @@
+# .github/workflows/release.yml
+#
+# This GitHub Actions workflow automates the process of building your
+# standalone GUI application for Windows, macOS, and Linux.
+#
+# How it works:
+# 1. Trigger: The workflow runs automatically whenever you create a new
+#    "Release" on your GitHub repository.
+# 2. Matrix Build: It sets up three separate virtual machines (one for each OS).
+# 3. Build Process: On each machine, it checks out your code, installs
+#    dependencies, and runs your `build_executable.py` script.
+# 4. Upload Assets: It takes the final zipped executables and attaches them
+#    to the GitHub Release page for users to download.
+
+name: Build Standalone GUI Releases
+
+on:
+  release:
+    types: [created]
+
+jobs:
+  build:
+    # Use a build matrix to run the job on Windows, macOS, and Ubuntu
+    strategy:
+      matrix:
+        os: [windows-latest, macos-latest, ubuntu-latest]
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      # Step 1: Check out the repository code
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      # Step 2: Set up Python environment
+      - name: Set up Python 3.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      # Step 3: Install system dependencies (for Linux/Ubuntu only)
+      # PyQt5 requires these libraries to run on a headless Linux server.
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgl1-mesa-glx libegl1-mesa libxkbcommon-x11-0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-render-util0 libxcb-xinerama0 libxcb-xinput0 qt5-qpa-plugins
+
+      # Step 4: Install Python dependencies
+      # This installs all packages from setup.py and the build tools.
+      - name: Install Python packages
+        run: |
+          python -m pip install --upgrade pip
+          pip install .
+          pip install pyinstaller
+
+      # Step 5: Build the executable using your script
+      - name: Build Standalone Executable
+        run: python build_executable.py
+
+      # Step 6: Package the application for release
+      # This step renames the executable and zips/tars it for distribution.
+      - name: Package the application
+        shell: bash
+        run: |
+          if [ "${{ runner.os }}" == "Windows" ]; then
+            mv dist/GridFlow dist/GridFlow.exe
+            7z a "GridFlow-Windows.zip" "./dist/GridFlow.exe"
+            echo "ASSET_PATH=GridFlow-Windows.zip" >> $GITHUB_ENV
+            echo "ASSET_NAME=GridFlow-Windows.zip" >> $GITHUB_ENV
+          elif [ "${{ runner.os }}" == "macOS" ]; then
+            mv dist/GridFlow dist/GridFlow.app
+            zip -r "GridFlow-macOS.zip" "./dist/GridFlow.app"
+            echo "ASSET_PATH=GridFlow-macOS.zip" >> $GITHUB_ENV
+            echo "ASSET_NAME=GridFlow-macOS.zip" >> $GITHUB_ENV
+          else # Linux
+            mv dist/GridFlow dist/GridFlow-Linux
+            tar -czvf "GridFlow-Linux.tar.gz" "./dist/GridFlow-Linux"
+            echo "ASSET_PATH=GridFlow-Linux.tar.gz" >> $GITHUB_ENV
+            echo "ASSET_NAME=GridFlow-Linux.tar.gz" >> $GITHUB_ENV
+          fi
+
+      # Step 7: Upload the packaged application to the GitHub Release
+      - name: Upload Release Asset
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ github.event.release.upload_url }}
+          asset_path: ${{ env.ASSET_PATH }}
+          asset_name: ${{ env.ASSET_NAME }}
+          asset_content_type: application/octet-stream
