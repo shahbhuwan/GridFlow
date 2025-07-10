@@ -51,7 +51,7 @@ GridFlow is a modular toolset for downloading and processing geospatial and clim
 
 ### Prerequisites
 
-- **Python**: Version 3.8 or higher.
+- **Python**: Version 3.10 or higher.
 - **pip**: Python package manager.
 - **Virtual Environment** (recommended): To isolate dependencies.
 
