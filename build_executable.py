@@ -2,6 +2,7 @@
 import PyInstaller.__main__
 from pathlib import Path
 import os
+import sys
 
 def get_data_files(data_dir):
     """
@@ -22,15 +23,7 @@ if __name__ == '__main__':
     # --- Configuration ---
     gui_script = 'gridflow/gui.py'
     app_name = 'GridFlow'
-    icon_path = 'gridflow_logo.ico'
     
-    # Directories containing data files to be bundled
-    data_directories_to_bundle = [
-        'gridflow/vocab',
-        'iowa_border',
-        'gridflow_logo.svg' # Also bundle the svg logo
-    ]
-
     # --- Build Command Assembly ---
     command = [
         gui_script,
@@ -40,8 +33,19 @@ if __name__ == '__main__':
         '--noconfirm',    # Overwrite previous builds without asking
     ]
 
-    if Path(icon_path).exists():
-        command.extend(['--icon', icon_path])
+    # --- Platform-Specific Icon ---
+    # Only apply the .ico file on Windows. macOS requires .icns.
+    if sys.platform == "win32":
+        icon_path = 'gridflow_logo.ico'
+        if Path(icon_path).exists():
+            command.extend(['--icon', icon_path])
+
+    # Directories containing data files to be bundled
+    data_directories_to_bundle = [
+        'gridflow/vocab',
+        'iowa_border',
+        'gridflow_logo.svg' # Also bundle the svg logo
+    ]
 
     # Add all data files from the specified directories
     for data_dir in data_directories_to_bundle:
@@ -59,5 +63,4 @@ if __name__ == '__main__':
     PyInstaller.__main__.run(command)
 
     print("\nBuild complete!")
-    print(f"Find your application in the 'dist/{app_name}' folder.")
-
+    print(f"Find your application in the 'dist/' folder.")
