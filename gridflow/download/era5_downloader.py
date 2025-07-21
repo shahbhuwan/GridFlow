@@ -153,6 +153,8 @@ class Downloader:
                     break
                 if future.result():
                     successful_downloads += 1
+                if self._stop_event.is_set():
+                    break
         finally:
             self.shutdown()
         

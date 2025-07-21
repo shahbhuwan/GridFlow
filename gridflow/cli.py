@@ -34,7 +34,7 @@ from gridflow.processing import (
 
 def print_intro():
     """Display the GridFlow welcome banner."""
-    banner = """
+    banner = r"""
 ==============================================================================================
      ____      _     _ _____ _                
     / ___|_ __(_) __| |  ___| | _____      __ 
