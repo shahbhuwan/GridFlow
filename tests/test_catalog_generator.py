@@ -134,7 +134,7 @@ def test_find_and_deduplicate_files_unique(cataloger, tmp_path):
     assert len(cataloger.duplicates) == 0
 
 def test_find_and_deduplicate_files_duplicates(cataloger, tmp_path, caplog):
-    caplog.set_level(logging.WARNING)
+    caplog.set_level(logging.DEBUG)
     input_dir = tmp_path / 'input'
     input_dir.mkdir()
     (input_dir / 'tas_file.nc').touch()
@@ -183,7 +183,7 @@ def test_generate_success(cataloger, mocker, tmp_path, caplog):
     assert len(cataloger.catalog) == 1
 
 def test_generate_incomplete_metadata(cataloger, mocker, tmp_path, caplog):
-    caplog.set_level(logging.WARNING)
+    caplog.set_level(logging.DEBUG)
     file_path = tmp_path / 'test.nc'
     mocker.patch.object(cataloger, 'find_and_deduplicate_files', return_value=[file_path])
     mocker.patch('gridflow.processing.catalog_generator.extract_metadata_from_file', return_value={
@@ -198,7 +198,7 @@ def test_generate_incomplete_metadata(cataloger, mocker, tmp_path, caplog):
     assert "Incomplete metadata" in caplog.text
 
 def test_generate_error(cataloger, mocker, tmp_path, caplog):
-    caplog.set_level(logging.ERROR)
+    caplog.set_level(logging.DEBUG)
     file_path = tmp_path / 'test.nc'
     mocker.patch.object(cataloger, 'find_and_deduplicate_files', return_value=[file_path])
     mocker.patch('gridflow.processing.catalog_generator.extract_metadata_from_file', return_value={
@@ -255,7 +255,7 @@ def test_process_metadata_result_success(cataloger):
     assert cataloger.catalog[key]["variables"]["tas"]["files"] == ["/path/test.nc"]
 
 def test_process_metadata_result_incomplete(cataloger, caplog):
-    caplog.set_level(logging.WARNING)
+    caplog.set_level(logging.DEBUG)
     result = {
         "file_path": "/path/test.nc",
         "metadata": {"activity_id": "CMIP"},
@@ -267,7 +267,7 @@ def test_process_metadata_result_incomplete(cataloger, caplog):
     assert "Incomplete metadata" in caplog.text
 
 def test_process_metadata_result_error(cataloger, caplog):
-    caplog.set_level(logging.ERROR)
+    caplog.set_level(logging.DEBUG)
     result = {
         "file_path": "/path/test.nc",
         "metadata": {},
@@ -286,7 +286,10 @@ def test_save_results_success(cataloger, mocker, tmp_path, caplog):
     cataloger.included_count = 1
     cataloger.skipped_count = 0
     mocker.patch('builtins.open', mock_open())
-    cataloger._save_results()
+    
+    with patch('gridflow.processing.catalog_generator.HAS_UI_LIBS', False):
+        cataloger._save_results()
+        
     assert "Catalog saved" in caplog.text
     assert "List of duplicate files saved" in caplog.text
     assert "Summary: Included 1 files" in caplog.text
@@ -329,10 +332,10 @@ def test_run_catalog_session_success(mocker, mock_stop_event, tmp_path):
     Cataloger.generate.assert_called_once()
 
 def test_run_catalog_session_exception(mocker, mock_stop_event, caplog):
-    caplog.set_level(logging.CRITICAL)
+    caplog.set_level(logging.INFO)
     mocker.patch.object(Cataloger, 'generate', side_effect=Exception("Critical"))
     run_catalog_session({}, mock_stop_event)
-    assert "critical error" in caplog.text.lower()
+    assert "Failed: A critical error occurred" in caplog.text
     assert mock_stop_event.set.called
 
 # ############################################################################
@@ -354,23 +357,65 @@ def test_add_arguments():
 @patch('gridflow.processing.catalog_generator.setup_logging')
 @patch('gridflow.processing.catalog_generator.run_catalog_session')
 @patch('signal.signal')
-def test_main_success(mock_signal, mock_session, mock_logging, mock_parser):
-    mock_args = MagicMock(input_dir='./in', output_dir='./out', log_dir='./logs', log_level='info', demo=False)
+def test_main_success(mock_signal, mock_run_session, mock_setup_logging, mock_parser, caplog):
+    """
+    CLI mode (is_gui_mode=False): installs signal handler, calls session,
+    and does NOT exit as long as a fresh stop_event remains clear.
+    """
+    caplog.set_level(logging.INFO)
+
+    fresh_evt = threading.Event() 
+
+    mock_args = MagicMock(
+        input_dir='./in',
+        output_dir='./out',
+        log_dir='./logs',
+        log_level='info',
+        demo=False,
+        is_gui_mode=False,   
+        stop_event=fresh_evt, 
+    )
     mock_parser.return_value.parse_args.return_value = mock_args
+
+    from gridflow.processing.catalog_generator import main, signal_handler
     main()
-    mock_session.assert_called()
+
+    mock_setup_logging.assert_called_once_with('./logs', 'info', prefix='catalog_generator')
+    mock_run_session.assert_called_once()
     mock_signal.assert_called_with(signal.SIGINT, signal_handler)
+    assert "Execution was interrupted." not in caplog.text
 
 @patch('argparse.ArgumentParser')
 @patch('gridflow.processing.catalog_generator.setup_logging')
 @patch('gridflow.processing.catalog_generator.run_catalog_session')
-def test_main_demo(mock_session, mock_logging, mock_parser, caplog):
+def test_main_demo(mock_run_session, mock_setup_logging, mock_parser, caplog):
+    """
+    Demo + GUI mode (is_gui_mode=True): uses demo defaults, runs session,
+    and never sys.exit(...) even if some other test toggled the module global.
+    """
     caplog.set_level(logging.INFO)
-    mock_args = MagicMock(demo=True, log_dir='./logs', log_level='info')
+
+    fresh_evt = threading.Event()
+
+    mock_args = MagicMock(
+        demo=True,
+        log_dir='./logs',
+        log_level='info',
+        is_gui_mode=True,      
+        stop_event=fresh_evt,   
+        input_dir=None,         
+        output_dir=None,
+    )
     mock_parser.return_value.parse_args.return_value = mock_args
+
+    from gridflow.processing.catalog_generator import main
     main()
-    assert "Running in demo mode" in caplog.text
-    mock_session.assert_called()
+
+    # FIX: In GUI mode, main() explicitly skips setup_logging
+    mock_setup_logging.assert_not_called()
+    mock_run_session.assert_called_once()
+    assert "Running in demo mode." in caplog.text
+    assert "Execution was interrupted." not in caplog.text
 
 @patch('argparse.ArgumentParser')
 @patch('gridflow.processing.catalog_generator.setup_logging')
@@ -380,15 +425,26 @@ def test_main_no_params(mock_logging, mock_parser, caplog):
     mock_parser.return_value.parse_args.return_value = mock_args
     with pytest.raises(SystemExit):
         main()
-    assert "--input_dir and --output_dir are required" in caplog.text
+    assert "Required arguments missing" in caplog.text
 
 @patch('argparse.ArgumentParser')
 @patch('gridflow.processing.catalog_generator.setup_logging')
 @patch('gridflow.processing.catalog_generator.stop_event')
-def test_main_interrupted(mock_stop, mock_logging, mock_parser, caplog):
-    caplog.set_level(logging.WARNING)
+def test_main_interrupted(mock_stop, mock_logging, mock_parser, caplog, tmp_path):
+    caplog.set_level(logging.INFO)
     mock_stop.is_set.return_value = True
-    mock_parser.return_value.parse_args.return_value = MagicMock()
+    
+    input_dir = tmp_path / 'in'
+    input_dir.mkdir()
+
+    mock_args = MagicMock(
+        input_dir=str(input_dir),
+        output_dir=str(tmp_path / 'out'),
+        demo=False,
+        is_gui_mode=False
+    )
+    mock_parser.return_value.parse_args.return_value = mock_args
+
     with pytest.raises(SystemExit) as exc:
         main()
     assert exc.value.code == 130

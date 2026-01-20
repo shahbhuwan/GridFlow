@@ -44,49 +44,63 @@ def print_intro():
 
 ==============================================================================================
 Welcome to GridFlow v{}! Copyright (c) 2025 Bhuwan Shah
-Effortlessly download and process PRISM, DEM, CMIP5, and CMIP6 climate data.
-Run `gridflow -h` for help or `gridflow prism --demo` to try a sample download.
+GridFlow is a modular Python toolkit for downloading and processing key climate and geospatial
+datasets. It provides both a powerful command-line interface and a user-friendly GUI to fetch 
+data from PRISM, DEM, CMIP5, CMIP6, and ERA5, and perform post-processing tasks like cropping, 
+clipping, and temporal aggregation.
 ==============================================================================================
 """.format(__version__)
     print(banner)
 
-class CustomHelpFormatter(argparse.RawDescriptionHelpFormatter):
-    """Custom formatter for consistent CLI help formatting."""
-    def _format_args(self, action, default_metavar):
-        get_metavar = self._metavar_formatter(action, default_metavar)
-        return '%s' % get_metavar(1) if action.nargs is None else super()._format_args(action, default_metavar)
 
-    def _format_action_invocation(self, action):
-        if not action.option_strings:
-            return super()._format_action_invocation(action)
-        option_strings = ', '.join(action.option_strings)
-        return f'{option_strings} {self._format_args(action, action.dest.upper())}'
+class WideHelpFormatter(argparse.ArgumentDefaultsHelpFormatter):
+    """A help formatter that provides a wider column for argument descriptions."""
+    def __init__(self, *args, **kwargs):
+        # Set a wider max_help_position for better alignment of help text
+        kwargs['max_help_position'] = 70
+        super().__init__(*args, **kwargs)
 
 def create_parser():
     """Creates the main argument parser with subcommands for each tool."""
-    parser = argparse.ArgumentParser(
-        description=(
-            "GridFlow: A modular toolset for downloading and processing geospatial data.\n"
-            "Supports PRISM, DEM, CMIP5, and CMIP6 data downloads, as well as NetCDF processing tasks like cropping, clipping, unit conversion, temporal aggregation, and catalog generation."
-        ),
-        epilog=(
-            "Examples:\n"
-            "  gridflow prism --demo                   # Download sample PRISM data\n"
-            "  gridflow dem --demo --api_key KEY       # Download sample DEM data\n"
-            "  gridflow cmip5 --demo                   # Download sample CMIP5 data\n"
-            "  gridflow cmip6 --demo                   # Download sample CMIP6 data\n"
-            "  gridflow era5 --demo --api_key UID:KEY  # Download sample ERA5 data\n"
-            "  gridflow crop --demo                    # Crop NetCDF files to sample bounds\n"
-            "  gridflow clip --demo                    # Clip NetCDF files using Iowa shapefile\n"
-            "  gridflow unit-convert --demo            # Convert units in NetCDF files\n"
-            "  gridflow temporal-aggregate --demo      # Aggregate NetCDF files temporally\n"
-            "  gridflow catalog --demo                 # Generate a sample catalog\n"
-            "\nRun 'gridflow <command> -h' for detailed help on each command."
-        ),
-        formatter_class=CustomHelpFormatter
+    parent_parser = argparse.ArgumentParser(add_help=False)
+    parent_parser.add_argument(
+        '-v', '--version', 
+        action='version', 
+        version=f'GridFlow {__version__}'
     )
-    parser.add_argument('-v', '--version', action='version', version=f'GridFlow {__version__}')
-    subparsers = parser.add_subparsers(title="commands", dest="command", help="Available tools", required=True)
+    parser = argparse.ArgumentParser(
+        description="Run 'gridflow <command> -h' for detailed help on each command.",
+        epilog=(
+"""
+Downloading Tools:
+  prism               Download PRISM climate data
+  cmip5               Download CMIP5 climate model data
+  cmip6               Download CMIP6 climate model data
+  era5                Download ERA5-Land climate data
+  dem                 Download Digital Elevation Models via OpenTopography
+
+Processing Tools:
+  crop                Crop NetCDF files to a spatial bounding box
+  clip                Clip NetCDF files using a shapefile
+  convert             Convert units in NetCDF files
+  aggregate           Temporally aggregate NetCDF files
+  catalog             Generate a catalog from NetCDF files
+
+Examples:
+  gridflow cmip6 --demo             # Download sample CMIP6 data
+  gridflow cmip5 --demo             # Download sample CMIP5 data
+  gridflow prism --demo             # Download sample PRISM data
+  gridflow crop --demo              # Crop NetCDF files to sample bounds
+    
+"""
+        ),
+        # FIX 1: Use RawTextHelpFormatter to preserve all spacing in the epilog.
+        formatter_class=argparse.RawTextHelpFormatter,
+        parents=[parent_parser]
+    )
+
+    # FIX 2: Use a title=" " and metavar="" to completely hide the automatic command list.
+    subparsers = parser.add_subparsers(dest="command", required=True, help=argparse.SUPPRESS)
 
     # PRISM Downloader
     prism_parser = subparsers.add_parser(
@@ -94,7 +108,7 @@ def create_parser():
         help="Download PRISM climate data",
         description="Download daily PRISM climate data for variables like precipitation or temperature.",
         epilog="Example: gridflow prism --demo\nDownloads sample PRISM tmean data (4km, 2020-01-01 to 2020-01-05).",
-        formatter_class=CustomHelpFormatter
+        parents=[parent_parser], formatter_class=WideHelpFormatter
     )
     prism_downloader.add_arguments(prism_parser)
 
@@ -104,7 +118,7 @@ def create_parser():
         help="Download Digital Elevation Models via OpenTopography",
         description="Download DEM data (e.g., COP30, SRTM) for a specified bounding box using an OpenTopography API key.",
         epilog="Example: gridflow dem --demo --api_key YOUR_KEY\nDownloads sample COP30 DEM for Iowa.",
-        formatter_class=CustomHelpFormatter
+        parents=[parent_parser], formatter_class=WideHelpFormatter
     )
     dem_downloader.add_arguments(dem_parser)
 
@@ -114,7 +128,7 @@ def create_parser():
         help="Download CMIP5 climate model data",
         description="Download CMIP5 climate model data from ESGF nodes based on specified parameters.",
         epilog="Example: gridflow cmip5 --demo\nDownloads sample CMIP5 tas data (CanESM2, historical).",
-        formatter_class=CustomHelpFormatter
+        parents=[parent_parser], formatter_class=WideHelpFormatter
     )
     cmip5_downloader.add_arguments(cmip5_parser)
 
@@ -124,7 +138,7 @@ def create_parser():
         help="Download CMIP6 climate model data",
         description="Download CMIP6 climate model data from ESGF nodes based on specified parameters.",
         epilog="Example: gridflow cmip6 --demo\nDownloads sample CMIP6 tas data (HadGEM3-GC31-LL, hist-1950).",
-        formatter_class=CustomHelpFormatter
+        parents=[parent_parser], formatter_class=WideHelpFormatter
     )
     cmip6_downloader.add_arguments(cmip6_parser)
 
@@ -132,7 +146,7 @@ def create_parser():
     era5_parser = subparsers.add_parser(
         "era5",
         help="Download ERA5-Land climate data",
-        formatter_class=CustomHelpFormatter
+        parents=[parent_parser], formatter_class=WideHelpFormatter
     )
     era5_downloader.add_arguments(era5_parser)
 
@@ -142,7 +156,7 @@ def create_parser():
         help="Crop NetCDF files to a spatial bounding box",
         description="Crop NetCDF files to a specified spatial bounding box defined by latitude and longitude.",
         epilog="Example: gridflow crop --demo\nCrops sample NetCDF files to a US bounding box.",
-        formatter_class=CustomHelpFormatter
+        parents=[parent_parser], formatter_class=WideHelpFormatter
     )
     crop_netcdf.add_arguments(crop_parser)
 
@@ -152,7 +166,7 @@ def create_parser():
         help="Clip NetCDF files using a shapefile",
         description="Clip NetCDF files to a region defined by a shapefile, with optional buffering.",
         epilog="Example: gridflow clip --demo\nClips sample NetCDF files using Iowa shapefile.",
-        formatter_class=CustomHelpFormatter
+        parents=[parent_parser], formatter_class=WideHelpFormatter
     )
     clip_netcdf.add_arguments(clip_parser)
 
@@ -162,7 +176,7 @@ def create_parser():
         help="Convert units in NetCDF files",
         description="Convert units of variables in NetCDF files (e.g., Kelvin to Celsius, flux to mm/day).",
         epilog="Example: gridflow unit-convert --demo\nConverts tas from Kelvin to Celsius in sample files.",
-        formatter_class=CustomHelpFormatter
+        parents=[parent_parser], formatter_class=WideHelpFormatter
     )
     unit_convert.add_arguments(unit_parser)
 
@@ -172,7 +186,7 @@ def create_parser():
         help="Temporally aggregate NetCDF files",
         description="Aggregate NetCDF files to monthly, seasonal, or annual frequency using methods like mean or sum.",
         epilog="Example: gridflow temporal-aggregate --demo\nAggregates tas to monthly mean in sample files.",
-        formatter_class=CustomHelpFormatter
+        parents=[parent_parser], formatter_class=WideHelpFormatter
     )
     temporal_aggregate.add_arguments(temporal_parser)
 
@@ -182,7 +196,7 @@ def create_parser():
         help="Generate a catalog from NetCDF files",
         description="Generate a JSON catalog summarizing metadata from NetCDF files.",
         epilog="Example: gridflow catalog --demo\nGenerates a catalog for sample CMIP6 files.",
-        formatter_class=CustomHelpFormatter
+        parents=[parent_parser], formatter_class=WideHelpFormatter
     )
     catalog_generator.add_arguments(catalog_parser)
 

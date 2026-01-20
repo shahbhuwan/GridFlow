@@ -6,3 +6,4 @@ requires = [
     "wheel"
 ]
 build-backend = "setuptools.build_meta"
+requires-python = ">=3.10"

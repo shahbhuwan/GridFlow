@@ -200,18 +200,22 @@ def test_download_all_no_files(downloader):
     assert failed == []
 
 def test_download_all_success(mocker, downloader):
-    mocker.patch.object(downloader, 'download_file', return_value={'file': 'info'})
+    file_info = {'file': 'info', 'output_path': Path('dummy/path.zip')}
+    mocker.patch.object(downloader, 'download_file', return_value=file_info)
     mocker.patch('concurrent.futures.ThreadPoolExecutor')
-    mocker.patch('concurrent.futures.as_completed', return_value=[MagicMock(result=lambda: {'file': 'info'})])
-    downloaded, failed = downloader.download_all([{'file': 'info'}])
+    mocker.patch('concurrent.futures.as_completed', return_value=[MagicMock(result=lambda: file_info)])
+    
+    downloaded, failed = downloader.download_all([file_info])
     assert len(downloaded) == 1
     assert len(failed) == 0
 
 def test_download_all_failure(mocker, downloader):
+    file_info = {'file': 'info', 'output_path': Path('dummy/path.zip')}
     mocker.patch.object(downloader, 'download_file', return_value=None)
     mocker.patch('concurrent.futures.ThreadPoolExecutor')
     mocker.patch('concurrent.futures.as_completed', return_value=[MagicMock(result=lambda: None)])
-    downloaded, failed = downloader.download_all([{'file': 'info'}])
+    
+    downloaded, failed = downloader.download_all([file_info])
     assert len(downloaded) == 0
     assert len(failed) == 1
 
@@ -247,7 +251,7 @@ def test_create_download_session_no_files(mocker, mock_stop_event, caplog):
     mocker.patch.object(AvailabilityChecker, 'find_available_files', return_value=[])
     with pytest.raises(SystemExit):
         create_download_session(settings, mock_stop_event)
-    assert "Found 0 available files" in caplog.text
+    assert "No files were found on the server" in caplog.text
 
 def test_create_download_session_existing_files(mocker, mock_stop_event, tmp_path, caplog):
     caplog.set_level(logging.INFO)
@@ -288,8 +292,8 @@ def test_create_download_session_exception(mocker, mock_stop_event, caplog):
 def test_add_arguments():
     parser = argparse.ArgumentParser()
     add_arguments(parser)
-    args = parser.parse_args(['--variable', 'ppt', '--start_date', '2020-01-01', '--end_date', '2020-01-31', '--workers', '2'])
-    assert args.variable == 'ppt'
+    args = parser.parse_args(['--variable', 'ppt', '--start-date', '2020-01-01', '--end-date', '2020-01-31', '--workers', '2'])
+    assert args.variable == ['ppt'] 
     assert args.start_date == '2020-01-01'
     assert args.end_date == '2020-01-31'
     assert args.workers == 2
@@ -305,17 +309,34 @@ def test_add_arguments():
 @patch('gridflow.download.prism_downloader.create_download_session')
 @patch('signal.signal')
 def test_main_success(mock_signal, mock_session, mock_logging, mock_parser):
-    mock_args = MagicMock(variable='ppt', start_date='2020-01-01', end_date='2020-01-31', log_dir='./logs', log_level='info')
+    evt = threading.Event()
+
+    mock_args = MagicMock(
+        variable='ppt',
+        start_date='2020-01-01',
+        end_date='2020-01-31',
+        log_dir='./logs',
+        log_level='info',
+    )
+    mock_args.is_gui_mode = False
+    mock_args.stop_event  = evt
+    mock_args.config = None
+    mock_args.demo = False
+
     mock_parser.return_value.parse_args.return_value = mock_args
+
     main()
-    mock_session.assert_called()
+
+    mock_session.assert_called_once()
     mock_signal.assert_called_with(signal.SIGINT, signal_handler)
+    args_passed, kwargs_passed = mock_session.call_args
+    assert args_passed[1] is evt
 
 @patch('argparse.ArgumentParser')
 @patch('gridflow.download.prism_downloader.setup_logging')
 @patch('gridflow.download.prism_downloader.create_download_session')
 def test_main_demo(mock_session, mock_logging, mock_parser):
-    mock_args = MagicMock(demo=True, log_dir='./logs', log_level='info')
+    mock_args = MagicMock(demo=True, log_dir='./logs', log_level='info', config=None)
     mock_parser.return_value.parse_args.return_value = mock_args
     main()
     mock_session.assert_called()
@@ -323,23 +344,45 @@ def test_main_demo(mock_session, mock_logging, mock_parser):
 @patch('argparse.ArgumentParser')
 @patch('gridflow.download.prism_downloader.setup_logging')
 def test_main_no_params(mock_logging, mock_parser, caplog):
-    mock_args = MagicMock()
-    mock_args.demo = False
-    mock_args.variable = None
+    mock_args            = MagicMock()
+    mock_args.demo       = False
+    mock_args.variable   = None
     mock_args.start_date = None
-    mock_args.end_date = None
+    mock_args.end_date   = None
+    mock_args.is_gui_mode = False
+    mock_args.config     = None
+
     mock_parser.return_value.parse_args.return_value = mock_args
-    with pytest.raises(SystemExit):
+
+    with pytest.raises(SystemExit) as exc:
         main()
+    assert exc.value.code == 1
     assert "required when not in --demo mode" in caplog.text
 
 @patch('argparse.ArgumentParser')
 @patch('gridflow.download.prism_downloader.setup_logging')
-@patch('gridflow.download.prism_downloader.stop_event')
-def test_main_interrupted(mock_stop, mock_logging, mock_parser, caplog):
-    mock_stop.is_set.return_value = True
-    mock_parser.return_value.parse_args.return_value = MagicMock()
+@patch('gridflow.download.prism_downloader.create_download_session')
+def test_main_interrupted(mock_session, mock_logging, mock_parser, caplog):
+    evt = threading.Event()
+    evt.set()
+
+    mock_args = MagicMock(
+        variable='ppt',
+        start_date='2020-01-01',
+        end_date='2020-01-31',
+        log_dir='./logs',
+        log_level='info',
+    )
+    mock_args.is_gui_mode = False
+    mock_args.stop_event  = evt
+    mock_args.config = None
+    mock_args.demo = False
+
+    mock_parser.return_value.parse_args.return_value = mock_args
+
+    mock_session.side_effect = lambda *a, **k: None
+
     with pytest.raises(SystemExit) as exc:
         main()
     assert exc.value.code == 130
-    assert "Execution was interrupted" in caplog.text
+    assert "Execution was interrupted." in caplog.text

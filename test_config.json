@@ -1,0 +1,17 @@
+{
+  "project": "CMIP6",
+  "activity": "CMIP",
+  "experiment": "historical",
+  "model": "ACCESS-CM2",
+  "variable": "tas",
+  "frequency": "mon",
+  "ensemble": "r1i1p1f1",
+  "max_downloads": 10,
+  "output_dir": "./downloads_from_config",
+  "metadata_dir": "./metadata_from_config",
+  "save_mode": "structured",
+  "workers": 6,
+  "id": "rmcgehee",
+  "password": "Rhino3192!",
+  "openid": "https://esgf-data.dkrz.de/esgf-idp/openid/rmcgehee"
+}

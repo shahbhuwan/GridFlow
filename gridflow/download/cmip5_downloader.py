@@ -17,15 +17,24 @@ import sys
 import json
 import signal
 import logging
+import time
 import requests
 import threading
 from pathlib import Path
+from bs4 import BeautifulSoup
 from hashlib import md5, sha256
 from urllib.parse import urlencode
 from urllib3.util.retry import Retry
 from requests.adapters import HTTPAdapter
 from typing import List, Dict, Optional, Tuple, Any
 from concurrent.futures import ThreadPoolExecutor, as_completed, Future
+
+try:
+    from tqdm import tqdm
+    from rich.console import Console
+    HAS_UI_LIBS = True
+except ImportError:
+    HAS_UI_LIBS = False
 
 # Local Imports
 try:
@@ -35,12 +44,18 @@ except ImportError:
     sys.exit(1)
 
 # Constants
-ESGF_NODES = [
-    "https://esgf-node.llnl.gov/esg-search/search",
-    "https://esgf-node.ipsl.upmc.fr/esg-search/search",
-    "https://esgf-data.dkrz.de/esg-search/search",
-    "https://esgf-index1.ceda.ac.uk/esg-search/search"
-]
+ALL_ESGF_NODES = {
+    "LLNL": "https://esgf-node.llnl.gov/esg-search/search",
+    "IPSL": "https://esgf-node.ipsl.upmc.fr/esg-search/search",
+    "DKRZ": "https://esgf-data.dkrz.de/esg-search/search",
+    "CEDA": "https://esgf-index1.ceda.ac.uk/esg-search/search",
+    "ANL": "https://esgf.anl.gov/esg-search/search",
+    "ORNL": "https://esgf.ornl.gov/esg-search/search",
+    "NCI": "https://esgf.nci.org.au/esg-search/search",
+    "LIU": "https://esg-dn1.nsc.liu.se/esg-search/search"
+}
+NODES_STATUS_URL = "https://esgf.github.io/nodes.html"
+DKRZ_NODE_KEY = "DKRZ" # Priority
 
 # Global Stop Event for Graceful Shutdown
 stop_event = threading.Event()
@@ -111,11 +126,60 @@ class FileManager:
             logging.error(f"Failed to save metadata to {metadata_path}: {e}")
 
 class QueryHandler:
-    """Handles querying ESGF nodes for CMIP5 dataset files."""
-    def __init__(self, nodes: List[str] = ESGF_NODES, stop_event: Optional[threading.Event] = None):
-        self.nodes = nodes
+    """Handles querying ESGF nodes for CMIP5 dataset files in parallel."""
+    def __init__(self, stop_event: Optional[threading.Event] = None):
+        self.all_nodes_map = ALL_ESGF_NODES
         self._stop_event = stop_event or threading.Event()
         self.session = InterruptibleSession(self._stop_event)
+        self.nodes = self._get_available_nodes()
+
+    def _get_available_nodes(self) -> List[str]:
+        """Fetches the list of active ESGF nodes from the status page and prioritizes them."""
+        logging.info(f"Checking node status from: {NODES_STATUS_URL}")
+        try:
+            response = requests.get(NODES_STATUS_URL, timeout=15)
+            response.raise_for_status()
+            soup = BeautifulSoup(response.text, 'html.parser')
+            
+            list_items = soup.find_all('li')
+            found_node_keys = set()
+            for item in list_items:
+                item_text = item.get_text()
+                for key in self.all_nodes_map:
+                    if key in item_text:
+                        found_node_keys.add(key)
+                        break
+            
+            if not found_node_keys:
+                logging.warning("Could not parse any known nodes from the status page. Falling back to the hardcoded list.")
+                available_urls = list(self.all_nodes_map.values())
+            else:
+                logging.debug(f"Nodes found on status page: {sorted(list(found_node_keys))}")
+                available_urls = [self.all_nodes_map[key] for key in found_node_keys if key in self.all_nodes_map]
+
+            prioritized_nodes = []
+            dkrz_url = self.all_nodes_map.get(DKRZ_NODE_KEY)
+
+            if dkrz_url and dkrz_url in available_urls:
+                prioritized_nodes.append(dkrz_url)
+                for url in available_urls:
+                    if url != dkrz_url:
+                        prioritized_nodes.append(url)
+            else:
+                prioritized_nodes = available_urls
+
+            logging.debug(f"Final hierarchical node list created ({len(prioritized_nodes)} available nodes): {prioritized_nodes}")
+            if not prioritized_nodes:
+                logging.error("No available ESGF nodes could be determined. Please check your network or the status page.")
+
+            return prioritized_nodes
+            
+        except requests.RequestException as e:
+            logging.error(f"Failed to fetch node status page: {e}. Using the full hardcoded list of nodes as a fallback.")
+            return list(self.all_nodes_map.values())
+        except Exception as e:
+            logging.error(f"An unexpected error occurred while checking node status: {e}. Using fallback list.", exc_info=True)
+            return list(self.all_nodes_map.values())
 
     def build_query(self, base_url: str, params: Dict[str, str]) -> str:
         query_params = {
@@ -128,36 +192,88 @@ class QueryHandler:
         }
         return f"{base_url}?{urlencode(query_params, safe='/')}"
 
-    def fetch_datasets(self, params: Dict[str, str], timeout: int) -> List[Dict]:
-        all_files, seen_ids = [], set()
-        for node in self.nodes:
-            if self._stop_event.is_set():
-                logging.info("Querying stopped by user.")
-                break
-            try:
-                logging.info(f"Querying node: {node}")
-                node_files = self._fetch_from_node(node, params, timeout)
-                unique_files = [f for f in node_files if f.get('id') not in seen_ids]
-                for f in unique_files: seen_ids.add(f.get('id'))
-                all_files.extend(unique_files)
-                if all_files or not any(params.values()):
-                    logging.debug(f"Retrieved {len(all_files)} unique files from {node}.")
-                    return all_files
-            except requests.exceptions.Timeout:
-                logging.warning(f"The request to node {node} timed out. Trying next node.")
-            except requests.exceptions.ConnectionError:
-                logging.warning(f"Could not connect to node {node}. Please check your network. Trying next node.")
-            except requests.RequestException as e:
-                logging.warning(f"An error occurred while connecting to {node}: {e}")
-            except Exception as e:
-                logging.error(f"An unexpected error occurred while querying {node}: {e}", exc_info=True)
-        
-        if not all_files:
-            logging.error("All nodes failed or no files were found for the given query.")
-        return all_files
+    def fetch_datasets(self, params: Dict[str, str], timeout: int, is_gui_mode: bool = False) -> List[Dict]:
+        """
+        Queries all available ESGF nodes in parallel and merges the results.
+        """
+        if not self.nodes:
+            logging.error("No ESGF nodes available to query.")
+            return []
+
+        merged_files: Dict[str, Dict] = {}
+        num_workers = len(self.nodes)
+
+        # UI Logic: Use Rich spinner ONLY if we have libs AND we are not in GUI mode
+        use_rich = HAS_UI_LIBS and not is_gui_mode
+        status_context = None
+
+        if use_rich:
+            # Use default Console (no padding)
+            console = Console()
+            # Spinner that shows work is happening
+            status_context = console.status(f"[bold green]Querying {num_workers} ESGF nodes (this may take a minute)...", spinner="dots")
+            status_context.start()
+        else:
+            logging.info(f"Querying {num_workers} node(s) in parallel...")
+
+        try:
+            with ThreadPoolExecutor(max_workers=num_workers, thread_name_prefix='QueryWorker') as executor:
+                future_to_node = {
+                    executor.submit(self._fetch_from_node, node, params, timeout): node 
+                    for node in self.nodes
+                }
+
+                for future in as_completed(future_to_node):
+                    node = future_to_node[future]
+                    try:
+                        files_from_node = future.result()
+                        if not files_from_node:
+                            logging.debug(f"No results returned from node: {node}")
+                            continue
+                        
+                        logging.debug(f"Received {len(files_from_node)} file results from {node}")
+                        
+                        for file_info in files_from_node:
+                            # FIX: Use 'title' for robust deduplication in CMIP5
+                            file_id = file_info.get('title')
+                            if not file_id:
+                                continue
+
+                            if file_id not in merged_files:
+                                merged_files[file_id] = file_info
+                            else:
+                                # File already found, merge the URLs
+                                existing_urls = set(merged_files[file_id].get('url', []))
+                                new_urls = set(file_info.get('url', []))
+                                merged_files[file_id]['url'] = sorted(list(existing_urls.union(new_urls)))
+                    
+                    except Exception as e:
+                        logging.error(f"An error occurred while querying node {node}: {e}")
+
+            if not merged_files:
+                if status_context: status_context.stop()
+                logging.info("All nodes failed or no files were found for the given query.")
+                return []
+            
+            final_list = list(merged_files.values())
+            
+            if status_context: status_context.stop()
+            
+            # Print success message
+            if use_rich:
+                console.print(f"[bold blue]Query complete![/] Found {len(final_list)} unique files.")
+            else:
+                logging.info(f"Parallel query complete. Found {len(final_list)} unique files across all nodes.")
+            
+            return final_list
+
+        finally:
+            if status_context:
+                status_context.stop()
 
     def _fetch_from_node(self, node: str, params: Dict[str, str], timeout: int) -> List[Dict]:
         files, offset = [], 0
+        logging.debug(f"Worker started for node: {node}")
         while not self._stop_event.is_set():
             query_url = self.build_query(node, {**params, 'offset': str(offset)})
             logging.debug(f"Querying URL: {query_url}")
@@ -186,7 +302,13 @@ class Downloader:
         self.pending_futures: Dict[Future, Dict] = {}
         self.worker_status: Dict[int, str] = {}
 
-        # Initialize session with OpenID certificate if provided
+        self.dead_urls: set[str] = set()
+        self.dead_lock = threading.Lock()
+
+        self.per_host_limit = int(self.settings.get('per_host_limit', 0))
+        self._host_semaphores: Dict[str, threading.Semaphore] = {}
+        self._host_lock = threading.Lock()
+
         openid, username, password = settings.get('openid'), settings.get('username'), settings.get('password')
         if openid and username and password:
             self._fetch_esgf_certificate(openid, username, password)
@@ -196,46 +318,55 @@ class Downloader:
             self.session.auth = (username, password)
 
     def _fetch_esgf_certificate(self, openid: str, username: str, password: str) -> None:
-        """Fetches an ESGF certificate using OpenID credentials."""
-        cert_dir = Path.home() / ".esg"
-        cert_dir.mkdir(exist_ok=True)
-        self.cert_path = cert_dir / "credentials.pem"
+            """Fetches an ESGF certificate using OpenID credentials."""
+            cert_dir = Path.home() / ".esg"
+            cert_dir.mkdir(exist_ok=True)
+            self.cert_path = cert_dir / "credentials.pem"
 
-        if self.cert_path.exists():
+            if self.cert_path.exists():
+                try:
+                    # Check certificate validity (simplified check)
+                    with open(self.cert_path, 'r') as f:
+                        cert_content = f.read()
+                    if "BEGIN CERTIFICATE" in cert_content:
+                        logging.debug(f"Using existing certificate at {self.cert_path}")
+                        return
+                except Exception:
+                    logging.debug("Existing certificate invalid or corrupted. Fetching new one.")
+
             try:
-                # Check certificate validity (simplified check)
-                with open(self.cert_path, 'r') as f:
-                    cert_content = f.read()
-                if "BEGIN CERTIFICATE" in cert_content:
-                    logging.debug(f"Using existing certificate at {self.cert_path}")
-                    return
-            except Exception:
-                logging.debug("Existing certificate invalid or corrupted. Fetching new one.")
+                # Construct the standard certificate endpoint from the OpenID's hostname.
+                # This is a much more reliable method that works for CEDA, LLNL, and others.
+                from urllib.parse import urlparse
+                parsed_uri = urlparse(openid)
+                hostname = parsed_uri.netloc
+                # The standard endpoint for certificate retrieval via username/password
+                login_url = f"https://{hostname}/esgf-idp/openid/login"
+                
+                logging.debug(f"Attempting to fetch certificate from standard endpoint: {login_url}")
+                
+                auth_data = {
+                    "openid_identifier": openid,
+                    "username": username,
+                    "password": password
+                }
+                
+                response = requests.post(login_url, data=auth_data, timeout=30)
+                response.raise_for_status()
 
-        try:
-            # Simulate OpenID login to fetch certificate
-            login_url = openid.rsplit('/', 1)[0] + "/esgf-idp/openid/"
-            auth_data = {
-                "openid": openid,
-                "username": username,
-                "password": password
-            }
-            response = requests.post(login_url, data=auth_data, timeout=30)
-            response.raise_for_status()
+                cert_content = response.text
+                if "BEGIN CERTIFICATE" not in cert_content:
+                    raise ValueError("No valid certificate received from ESGF. Please check your credentials.")
 
-            cert_content = response.text
-            if "BEGIN CERTIFICATE" not in cert_content:
-                raise ValueError("No valid certificate received from ESGF.")
-
-            with open(self.cert_path, 'w') as f:
-                f.write(cert_content)
-            logging.info(f"Fetched ESGF certificate and saved to {self.cert_path}")
-        except requests.RequestException as e:
-            logging.error(f"Failed to fetch ESGF certificate: {e}")
-            self.cert_path = None
-        except Exception as e:
-            logging.error(f"Unexpected error during certificate fetch: {e}")
-            self.cert_path = None
+                with open(self.cert_path, 'w') as f:
+                    f.write(cert_content)
+                logging.info(f"Fetched ESGF certificate and saved to {self.cert_path}")
+            except requests.RequestException as e:
+                logging.error(f"Failed to fetch ESGF certificate: {e}. Please check your credentials and network connection.")
+                self.cert_path = None
+            except Exception as e:
+                logging.error(f"Unexpected error during certificate fetch: {e}")
+                self.cert_path = None
 
     def shutdown(self):
         """Shuts down the thread pool gracefully."""
@@ -263,6 +394,9 @@ class Downloader:
 
     def download_file(self, file_info: Dict) -> Tuple[Optional[str], Optional[Dict]]:
         """Downloads a single file with robust URL parsing and retries."""
+        import random
+        from urllib.parse import urlparse
+
         thread_id = threading.get_ident()
         filename = file_info.get('title', 'unknown_file')
 
@@ -271,76 +405,235 @@ class Downloader:
                 self.worker_status[thread_id] = filename
                 logging.debug(f"[Worker-{thread_id}] Starting download of: {filename}")
 
-            if self._stop_event.is_set(): return None, file_info
+            if self._stop_event.is_set():
+                return None, file_info
 
             output_path = self.file_manager.get_output_path(file_info)
+            # Fast path: already present and valid
             if output_path.exists() and self.verify_checksum(output_path, file_info):
-                logging.info(f"Downloaded {filename} (already exists)")
+                # FIX: Debug only, so it doesn't spam console
+                logging.debug(f"Downloaded {filename} (already exists)")
                 return str(output_path), None
             
             urls_data = file_info.get('url', [])
             download_urls = [p[0] for p in (u.split('|') for u in urls_data) if len(p) == 3 and p[2] == 'HTTPServer']
-            
             if not download_urls:
                 logging.error(f"No 'HTTPServer' URL for {filename}")
                 return None, file_info
 
-            for url in download_urls:
-                if self._stop_event.is_set(): break
-                temp_path = output_path.with_suffix(output_path.suffix + '.tmp')
-                try:
-                    logging.debug(f"[Worker-{thread_id}] Trying URL {url}")
-                    response = self.session.get(url, stream=True, verify=not self.settings.get('no_verify_ssl'))
-                    response.raise_for_status()
+            # Optional preferred nodes ordering
+            prefer = [h.strip() for h in (self.settings.get('prefer_nodes') or "").split(',') if h.strip()]
+            if prefer:
+                def pref_key(u: str) -> int:
+                    host = urlparse(u).netloc
+                    for i, frag in enumerate(prefer):
+                        if frag in host:
+                            return i
+                    return len(prefer) + 1
+                download_urls.sort(key=pref_key)
 
-                    with open(temp_path, 'wb') as f:
-                        for chunk in response.iter_content(chunk_size=8192):
+            # Resume settings
+            resume_enabled = bool(self.settings.get('resume', False))
+            temp_path = output_path.with_suffix(output_path.suffix + '.part')  # persistent partial for resume
+            existing_bytes = temp_path.stat().st_size if resume_enabled and temp_path.exists() else 0
+
+            # Timeouts tuned for fast stop responsiveness
+            connect_timeout = 5
+            read_timeout = max(5, int(self.settings.get('timeout', 10)))
+
+            for url in download_urls:
+                if self._stop_event.is_set():
+                    return None, file_info
+
+                with self.dead_lock:
+                    if url in self.dead_urls:
+                        logging.debug(f"[Worker-{thread_id}] Skipping known-dead mirror {url}")
+                        continue
+
+                host = urlparse(url).netloc
+                host_sem = None
+                if getattr(self, "per_host_limit", 0):
+                    with self._host_lock:
+                        host_sem = self._host_semaphores.setdefault(host, threading.Semaphore(self.per_host_limit))
+                    host_sem.acquire()
+
+                try:
+                    # Probe with HEAD if resuming from a partial
+                    use_range = False
+                    expected_size = None
+                    if resume_enabled and existing_bytes > 0:
+                        try:
+                            h = self.session.head(url, timeout=(connect_timeout, 5), allow_redirects=True,
+                                                verify=not self.settings.get('no_verify_ssl'))
+                            h.raise_for_status()
+                            accept_ranges = h.headers.get("Accept-Ranges", "").lower() == "bytes"
+                            cl_header = h.headers.get("Content-Length")
+                            expected_size = int(cl_header) if cl_header and cl_header.isdigit() else None
+                            if accept_ranges and (expected_size is None or existing_bytes < expected_size):
+                                use_range = True
+                        except requests.RequestException as e:
+                            logging.debug(f"[Worker-{thread_id}] HEAD probe failed for {url}: {e}")
+                            use_range = existing_bytes > 0
+
+                    headers = {}
+                    mode = 'wb'
+                    start_from = 0
+                    if resume_enabled and existing_bytes > 0 and use_range:
+                        headers["Range"] = f"bytes={existing_bytes}-"
+                        mode = 'ab'
+                        start_from = existing_bytes
+
+                    logging.debug(f"[Worker-{thread_id}] Trying URL {url} (resume={resume_enabled}, offset={start_from})")
+
+                    resp = self.session.get(
+                        url, stream=True, verify=not self.settings.get('no_verify_ssl'),
+                        timeout=(connect_timeout, read_timeout), headers=headers or None,
+                    )
+
+                    if resp.status_code == 416 and resume_enabled and existing_bytes > 0:
+                        logging.debug(f"[Worker-{thread_id}] 416 for {url}; retrying from start.")
+                        resp.close()
+                        headers, mode, start_from = {}, 'wb', 0
+                        resp = self.session.get(url, stream=True, verify=not self.settings.get('no_verify_ssl'),
+                                              timeout=(connect_timeout, read_timeout))
+
+                    resp.raise_for_status()
+
+                    bytes_written = 0
+                    temp_path.parent.mkdir(parents=True, exist_ok=True)
+                    with open(temp_path, mode) as f:
+                        for chunk in resp.iter_content(chunk_size=1 << 15):
                             if self._stop_event.is_set():
                                 raise requests.exceptions.RequestException("Download interrupted by user.")
-                            f.write(chunk)
+                            if chunk:
+                                f.write(chunk)
+                                bytes_written += len(chunk)
+
+                    final_size = (start_from + bytes_written)
+                    if expected_size is not None and final_size != expected_size:
+                        logging.warning(f"[Worker-{thread_id}] Size mismatch for {filename}: {final_size} vs {expected_size}")
 
                     if self.verify_checksum(temp_path, file_info):
-                        temp_path.rename(output_path)
-                        logging.info(f"Downloaded {filename}")
+                        temp_path.replace(output_path)
+                        # FIX: Debug only. 'download_all' will handle the pretty print.
+                        logging.debug(f"Downloaded {filename}")
                         return str(output_path), None
+                    else:
+                        logging.warning(f"[Worker-{thread_id}] Checksum mismatch for {filename} from {url}")
+
                 except requests.RequestException as e:
+                    if self._stop_event.is_set():
+                        return None, file_info
+                    status = getattr(getattr(e, "response", None), "status_code", None)
+                    if status in (404, 410):
+                        with self.dead_lock:
+                            self.dead_urls.add(url)
                     logging.warning(f"[Worker-{thread_id}] Download failed for {filename} from {url}: {e}")
+
                 finally:
-                    if temp_path.exists(): temp_path.unlink(missing_ok=True)
-            
+                    if not resume_enabled and temp_path.exists():
+                        try: temp_path.unlink() 
+                        except: pass
+                    if host_sem: host_sem.release()
+
+                if not self._stop_event.is_set():
+                    time.sleep(0.2 + 0.4 * random.random())
+                
+                existing_bytes = temp_path.stat().st_size if resume_enabled and temp_path.exists() else 0
+
             return None, file_info
+
         finally:
             with self.log_lock:
                 if thread_id in self.worker_status:
                     del self.worker_status[thread_id]
-                    logging.debug(f"[Worker-{thread_id}] Finished task for {filename}.")
 
     def download_all(self, files_to_download: List[Dict]) -> Tuple[List[str], List[Dict]]:
         """Manages the download of a list of files using a thread pool."""
-        downloaded, failed = [], []
-        if not files_to_download: return [], []
+        import sys
         
+        downloaded, failed = [], []
+        if not files_to_download:
+            return [], []
+
         total_files = len(files_to_download)
-        self.executor = ThreadPoolExecutor(max_workers=self.settings.get('workers'), thread_name_prefix='Downloader')
-        self.pending_futures = {self.executor.submit(self.download_file, f): f for f in files_to_download}
+        self.executor = ThreadPoolExecutor(
+            max_workers=self.settings.get('workers'),
+            thread_name_prefix='Downloader'
+        )
+        self.pending_futures = {
+            self.executor.submit(self.download_file, f): f for f in files_to_download
+        }
+
+        # Determine if we should use TQDM or Standard Logging
+        is_gui_mode = self.settings.get('is_gui_mode', False)
+        use_tqdm = HAS_UI_LIBS and not is_gui_mode
+
+        futures_iter = as_completed(self.pending_futures)
+        
+        # Initialize the progress bar correctly
+        if use_tqdm:
+            futures_iter = tqdm(
+                futures_iter, 
+                total=total_files, 
+                unit="file", 
+                desc="Downloading", 
+                ncols=90, 
+                bar_format='  {l_bar}{bar}{r_bar}'
+            )
 
         try:
-            for i, future in enumerate(as_completed(self.pending_futures)):
-                logging.info(f"Progress: {i + 1}/{total_files} files processed.")
-                if self._stop_event.is_set(): break
+            for i, future in enumerate(futures_iter):
+                if self._stop_event.is_set():
+                    for f in self.pending_futures: f.cancel()
+                    break
+
+                # GUI NEEDS these logs to update its progress bar
+                if is_gui_mode:
+                    logging.info(f"Progress: {i + 1}/{total_files} files processed.")
+
                 original_file_info = self.pending_futures[future]
                 try:
                     path, failed_info = future.result()
-                    if path: downloaded.append(path)
-                    if failed_info: failed.append(failed_info)
+                    
+                    # Handle success INSIDE the loop, where 'path' is defined
+                    if path:
+                        downloaded.append(path)
+                        if use_tqdm:
+                            short_name = (Path(path).name[:50] + '..') if len(Path(path).name) > 50 else Path(path).name
+                            # Use static tqdm.write to avoid crashing iterator objects
+                            tqdm.write(f"  ✔ Downloaded {short_name}")
+                        elif is_gui_mode:
+                            logging.info(f"Downloaded {Path(path).name}")
+                            
+                    if failed_info:
+                        failed.append(failed_info)
+                        
                 except Exception as e:
                     failed.append(original_file_info)
-                    logging.error(f"A critical error occurred while processing {original_file_info.get('title')}: {e}", exc_info=True)
-        finally:
-            self.shutdown()
+                    title = original_file_info.get('title', 'a file')
+                    
+                    if is_gui_mode:
+                        logging.info(f"Failed: An error occurred while processing {title}.")
+                    elif use_tqdm:
+                        tqdm.write(f"  ✖ Failed: {title}")
+                    
+                    logging.debug(f"Full error trace for {title}: {e}", exc_info=True)
         
+        except Exception as e:
+            # Print critical errors to stderr so you can see them even if logs fail
+            print(f"\nCRITICAL ERROR in download loop: {e}", file=sys.stderr)
+            raise e
+            
+        finally:
+            if self._stop_event.is_set():
+                self.shutdown()
+            else:
+                self.shutdown()
+
         self.successful_downloads = len(downloaded)
         return downloaded, failed
+    
 
 def load_config(config_path: str) -> Dict:
     """Loads a JSON configuration file."""
@@ -352,28 +645,39 @@ def load_config(config_path: str) -> Dict:
         sys.exit(1)
 
 def create_download_session(params: Dict[str, Any], settings: Dict[str, Any], stop_event: threading.Event) -> None:
-    """Sets up and executes a download session."""
+    """Sets up and executes a download session (GUI-safe behavior)."""
+    is_gui_mode = settings.get('is_gui_mode', False)
     try:
         if settings.get('retry_failed_path'):
             files_to_process = load_config(settings['retry_failed_path'])
             if not files_to_process:
                 logging.info("Retry file is empty. Nothing to do.")
-                sys.exit(0)
+                if not is_gui_mode: sys.exit(0)
+                return
             logging.info(f"Retrying {len(files_to_process)} files from {settings['retry_failed_path']}")
         else:
-            if not any(params.values()) and not settings.get('demo'):
-                 logging.error("No search parameters provided. Please specify criteria like --variable or --model.")
-                 sys.exit(1)
+            user_intent_params = {
+                k: v for k, v in params.items() 
+                if k not in ['project', 'latest'] and v
+            }
+            
+            if not user_intent_params and not settings.get('demo'):
+                logging.error("No specific search parameters provided. Please specify criteria like --variable, --model, or --experiment.")
+                if not is_gui_mode: sys.exit(1)
+                return
             
             query_handler = QueryHandler(stop_event=stop_event)
-            all_found_files = query_handler.fetch_datasets(params, settings['timeout'])
             
-            if not all_found_files: sys.exit(1)
+            unique_files = query_handler.fetch_datasets(
+                params, 
+                settings.get('timeout', 30), 
+                is_gui_mode=is_gui_mode
+            )
+            
+            if not unique_files:
+                if not is_gui_mode: sys.exit(1)
+                return
             if stop_event.is_set(): return
-            
-            files_by_title = {f['title']: f for f in all_found_files if 'title' in f}
-            unique_files = list(files_by_title.values())
-            logging.info(f"Found {len(unique_files)} unique files.")
 
             max_downloads = settings.get('max_downloads')
             files_to_process = unique_files[:max_downloads] if max_downloads else unique_files
@@ -389,6 +693,7 @@ def create_download_session(params: Dict[str, Any], settings: Dict[str, Any], st
             logging.info(f"Dry run: Would attempt to download {len(files_to_process)} files.")
             return
 
+        settings.pop('stop_event', None)
         downloader = Downloader(file_manager, stop_event, **settings)
         downloaded, failed = downloader.download_all(files_to_process)
         
@@ -400,8 +705,10 @@ def create_download_session(params: Dict[str, Any], settings: Dict[str, Any], st
         logging.info(f"Completed: {downloader.successful_downloads}/{len(files_to_process)} files downloaded successfully.")
 
     except Exception as e:
-        logging.critical(f"A critical error occurred during the session: {e}", exc_info=True)
+        logging.info(f"Failed: A critical error stopped the session. See log file for details.")
+        logging.error(f"Full critical error trace for session: {e}", exc_info=True)
         stop_event.set()
+
 
 def add_arguments(parser):
     """Add CMIP5 downloader arguments to the provided parser."""
@@ -409,25 +716,25 @@ def add_arguments(parser):
     settings_group = parser.add_argument_group('Download & Output Settings')
     mode_group = parser.add_argument_group('Authentication & Special Modes')
 
-    query_group.add_argument("--config", help="Path to JSON config file to pre-fill arguments.")
-    query_group.add_argument("--project", default="CMIP5", help="Project name (e.g., CMIP5).")
-    query_group.add_argument("--model", help="Model name (e.g., CanCM4, GFDL-CM3).")
-    query_group.add_argument("--institute", help="Modeling institute (e.g., CCCMA).")
-    query_group.add_argument("--experiment", help="Experiment name (e.g., historical, rcp85).")
+    query_group.add_argument("-p", "--project", default="CMIP5", help="Project name (e.g., CMIP5).")
+    query_group.add_argument("-m", "--model", help="Model name (e.g., CanCM4, GFDL-CM3).")
+    query_group.add_argument("-i", "--institute", help="Modeling institute (e.g., CCCMA).")
+    query_group.add_argument("-e", "--experiment", help="Experiment name (e.g., historical, rcp85).")
     query_group.add_argument("--experiment_family", help="Experiment family (e.g., Decadal, RCP).")
-    query_group.add_argument("--variable", help="Variable name (e.g., tas, pr).")
-    query_group.add_argument("--frequency", help="Time frequency (e.g., mon, day). Maps to 'time_frequency'.")
-    query_group.add_argument("--realm", help="Modeling realm (e.g., atmos, ocean).")
-    query_group.add_argument("--ensemble", help="Ensemble member (e.g., r1i1p1).")
-    query_group.add_argument("--latest", action='store_true', help="Only get the latest version of files.")
-
-    settings_group.add_argument("--output-dir", default="./downloads_cmip5", help="Directory to save downloaded files.")
-    settings_group.add_argument("--metadata-dir", default="./metadata_cmip5", help="Directory to save metadata files.")
-    settings_group.add_argument("--log-dir", default="./gridflow_logs", help="Directory to save log files.")
-    settings_group.add_argument("--log-level", default="verbose", choices=["minimal", "verbose", "debug"], help="Set logging verbosity for the console.")
-    settings_group.add_argument("--save-mode", default="structured", choices=["structured", "flat"], help="File saving mode: 'structured' (subdirs) or 'flat' (one dir).")
-    settings_group.add_argument("--workers", type=int, default=4, help="Number of parallel download workers.")
-    settings_group.add_argument("--timeout", type=int, default=30, help="Network request timeout in seconds.")
+    query_group.add_argument("-var", "--variable", help="Variable name (e.g., tas, pr).")
+    query_group.add_argument("-f", "--frequency", help="Time frequency (e.g., mon, day). Maps to 'time_frequency'.")
+    query_group.add_argument("-r", "--realm", help="Modeling realm (e.g., atmos, ocean).")
+    query_group.add_argument("-en", "--ensemble", help="Ensemble member (e.g., r1i1p1).")
+    query_group.add_argument("-l", "--latest", action='store_true', help="Only get the latest version of files.")
+    query_group.add_argument("-c", "--config", help="Path to JSON config file to pre-fill arguments.")
+    
+    settings_group.add_argument("-o", "--output-dir", default="./downloads_cmip5", help="Directory to save downloaded files.")
+    settings_group.add_argument("-md", "--metadata-dir", default="./metadata_cmip5", help="Directory to save metadata files.")
+    settings_group.add_argument("-ld", "--log-dir", default="./gridflow_logs", help="Directory to save log files.")
+    settings_group.add_argument("-ll", "--log-level", default="minimal", choices=["minimal", "verbose", "debug"], help="Set logging verbosity for the console.")
+    settings_group.add_argument("-sm", "--save-mode", default="structured", choices=["structured", "flat"], help="File saving mode: 'structured' (subdirs) or 'flat' (one dir).")
+    settings_group.add_argument("-w", "--workers", type=int, default=4, help="Number of parallel download workers.")
+    settings_group.add_argument("-t", "--timeout", type=int, default=30, help="Network request timeout in seconds.")
     settings_group.add_argument("--max-downloads", type=int, help="Maximum number of files to download in this session.")
     settings_group.add_argument("--no-verify-ssl", action="store_true", help="Disable SSL certificate verification (use with caution).")
 
@@ -446,8 +753,12 @@ def main(args=None):
         add_arguments(parser)
         args = parser.parse_args()
 
-    setup_logging(args.log_dir, args.log_level, prefix="cmip5_downloader")
-    signal.signal(signal.SIGINT, signal_handler)
+    # FIX: Only set up logging if NOT in GUI mode
+    if not getattr(args, 'is_gui_mode', False):
+        setup_logging(args.log_dir, args.log_level, prefix="cmip5_downloader")
+        signal.signal(signal.SIGINT, signal_handler)
+
+    active_stop_event = getattr(args, 'stop_event', stop_event)
 
     config = load_config(args.config) if args.config else {}
     cli_args = {k: v for k, v in vars(args).items() if v is not None}
@@ -474,21 +785,40 @@ def main(args=None):
             'realm': 'atmos', 'ensemble': 'r1i1p1', 'limit': '5'
         }
         settings['max_downloads'] = 5
-        logging.info("Running in demo mode with a pre-defined CMIP5 query.")
+
+        demo_cmd = (
+            "gridflow cmip5 "
+            "-var tas "
+            "-m CanESM2 "
+            "-e historical "
+            "-f mon "
+            "-en r1i1p1 "
+            "--max-downloads 5"
+        )
+
+        if HAS_UI_LIBS and not getattr(args, 'is_gui_mode', False):
+            console = Console()
+            console.print(f"[bold yellow]Running in demo mode with a pre-defined CMIP5 query.[/]")
+            console.print(f"Demo Command:\n  [dim]{demo_cmd}[/dim]\n")
+        else:
+            logging.info(f"Running in demo mode.\nDemo Command: {demo_cmd}")
 
     # Validate OpenID authentication
     if settings.get('openid') and not all([settings.get('id'), settings.get('password')]):
         logging.error("Both --id and --password are required when using --openid.")
-        sys.exit(1)
+        if not getattr(args, 'is_gui_mode', False):
+            sys.exit(1)
+        return
 
     params = {k: v for k, v in params.items() if v}
     settings['username'] = settings.get('id')
     
-    create_download_session(params, settings, stop_event)
+    create_download_session(params, settings, active_stop_event)
     
-    if stop_event.is_set():
+    if active_stop_event.is_set():
         logging.warning("Execution was interrupted.")
-        sys.exit(130)
+        if not getattr(args, 'is_gui_mode', False):
+            sys.exit(130)
     
     logging.info("Process finished.")
 

@@ -1,26 +1,24 @@
 from setuptools import setup, find_packages
 
+VERSION = "1.0" 
+
+with open('requirements.txt', 'r') as f:
+    install_requires = f.read().strip().split('\n')
+
 setup(
     name="gridflow",
-    version="1.0",
+    version=VERSION,
     packages=find_packages(),
-    install_requires=[
-        "PyQt5>=5.15.0",
-        "requests>=2.28.0",
-        "numpy>=1.21.0",
-        "netCDF4>=1.5.8",
-        "geopandas>=0.10.0",
-        "shapely>=1.8.0",
-        "python-dateutil>=2.8.0",
-        "cdsapi>=0.7.4"
-    ],
+    
+    install_requires=install_requires,
+    
     package_data={
         "gridflow": [
             "iowa_border/*",
-            "gridflow_logo.png",
             "vocab/*.json"
         ]
     },
+    
     entry_points={
         "console_scripts": [
             "gridflow=gridflow.cli:main",

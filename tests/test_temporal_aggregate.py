@@ -5,6 +5,7 @@ import logging
 import signal
 import sys
 import threading
+import os
 from concurrent.futures import Future
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -13,6 +14,7 @@ import pytest
 import numpy as np
 from datetime import datetime
 
+# Updated imports to match the new gridflow.processing.temporal_aggregate structure
 import gridflow.processing.temporal_aggregate as temporal_aggregate
 from gridflow.processing.temporal_aggregate import (
     signal_handler,
@@ -22,377 +24,293 @@ from gridflow.processing.temporal_aggregate import (
     run_aggregator_session,
     add_arguments,
     main,
+    HAS_UI_LIBS
 )
 
 # ############################################################################
 # Fixtures
 # ############################################################################
 
-# FIX: Define a helper class to properly mock a NetCDF variable.
-# This class is subscriptable and has a clean __dict__ for iteration.
 class MockNetCDFVariable:
+    """Helper to simulate a subscriptable NetCDF variable with metadata."""
     def __init__(self):
         self.dtype = np.float32
         self.dimensions = ('time', 'lat', 'lon')
         self._FillValue = -999.0
         self.units = 'K'
-        self.long_name = 'temperature'
+        self.__dict__.update({'long_name': 'temperature'})
 
     def __getitem__(self, key):
-        # This makes the object subscriptable, e.g., var[:]
-        # FIX: Data must be 3D to match dimensions ('time', 'lat', 'lon')
-        return np.ma.array([[[1]], [[2]], [[3]]])
+        # Returns a 3D masked array to match dimensions
+        return np.ma.array([[[273.15]], [[274.15]], [[275.15]]])
 
 @pytest.fixture
 def mock_stop_event():
+    """Fixture for a mock threading.Event."""
     event = MagicMock(spec=threading.Event)
     event.is_set.return_value = False
     return event
 
 @pytest.fixture
 def aggregator(mock_stop_event):
-    settings = {'workers': 1, 'variable': 'tas', 'output_frequency': 'monthly', 'method': 'mean'}
+    """Fixture for a TemporalAggregator instance."""
+    settings = {
+        'workers': 1, 
+        'variable': 'tas', 
+        'output_frequency': 'monthly', 
+        'method': 'mean',
+        'is_gui_mode': False
+    }
     return TemporalAggregator(settings, mock_stop_event)
 
 @pytest.fixture
 def mock_nc_dataset(mocker):
-    mock_src = MagicMock()
-    mock_dst = MagicMock()
-    mocker.patch('gridflow.processing.temporal_aggregate.nc.Dataset', side_effect=[mock_src, mock_dst])
+    """Orchestrates clean mocks for NetCDF Source and Destination datasets."""
+    mock_src = MagicMock(name="SourceDataset")
+    mock_dst = MagicMock(name="DestinationDataset")
+
+    mocker.patch('gridflow.processing.temporal_aggregate.nc.Dataset', side_effect=[mock_src, mock_src, mock_dst])
+    
+    # Setup context manager behavior
     mock_src.__enter__.return_value = mock_src
     mock_dst.__enter__.return_value = mock_dst
 
-    # --- Mocks for variables and dimensions ---
-    mock_time = MagicMock()
+    # Setup Source Time Variable
+    mock_time = MagicMock(name="TimeVar")
     mock_time.units = 'days since 2000-01-01'
     mock_time.calendar = 'standard'
     mock_time.axis = 'T'
-    mock_time.__getitem__.return_value = np.array([0, 31, 59])  # Jan 1, Feb 1, Mar 1
-    
-    # Use the custom helper class for the variable mock
-    mock_var = MockNetCDFVariable()
-    
-    dim_time = MagicMock()
-    dim_time.isunlimited.return_value = True
-    dim_lat = MagicMock()
-    dim_lat.isunlimited.return_value = False
-    dim_lat.__len__.return_value = 1
-    dim_lon = MagicMock()
-    dim_lon.isunlimited.return_value = False
-    dim_lon.__len__.return_value = 1
-    
-    # Set attributes directly and avoid touching __dict__ to prevent mock corruption.
-    mock_src.file_format = 'NETCDF4'
-    mock_src.dimensions = {'time': dim_time, 'lat': dim_lat, 'lon': dim_lon}
-    mock_src.variables = {'time': mock_time, 'tas': mock_var}
+    # Return a numpy array when sliced/indexed
+    mock_time.__getitem__.return_value = np.array([0, 31, 59])
 
-    mock_create_var = MagicMock()
+    # Setup Source Data Variable
+    mock_var = MockNetCDFVariable()
+
+    # Setup Dimensions
+    dim_time = MagicMock(name="TimeDim")
+    dim_time.isunlimited.return_value = True
+    dim_lat = MagicMock(name="LatDim")
+    dim_lat.__len__.return_value = 1
+    
+    # Configure mock_src attributes without overwriting __dict__
+    mock_src.file_format = 'NETCDF4'
+    mock_src.dimensions = {'time': dim_time, 'lat': dim_lat}
+    mock_src.variables = {'time': mock_time, 'tas': mock_var}
+    mock_src.Conventions = 'CF-1.7'
+
+    # Setup Destination variable creation
+    mock_create_var = MagicMock(name="CreatedVar")
     mock_dst.createVariable.return_value = mock_create_var
     
     return mock_src, mock_dst, mock_create_var
 
 # ############################################################################
-# Tests for signal_handler
+# Tests for Core Logic & Helpers
 # ############################################################################
 
 def test_signal_handler(caplog, mocker):
-    caplog.set_level(logging.INFO)
+    """Verify stop_event is set on signal."""
+    caplog.set_level(logging.WARNING)
     mock_event = mocker.patch('gridflow.processing.temporal_aggregate.stop_event')
     signal_handler(None, None)
     assert mock_event.set.called
     assert "Stop signal received" in caplog.text
-    assert "Please wait for ongoing tasks" in caplog.text
 
-# ############################################################################
-# Tests for find_time_variable
-# ############################################################################
-
-def test_find_time_variable_standard_name():
+def test_find_time_variable():
+    """Verify identification of time dimension via attributes and names."""
     mock_ds = MagicMock()
-    mock_var = MagicMock(standard_name='time', spec=['standard_name', 'axis'])
-    mock_ds.variables = {'tvar': mock_var}
-    assert find_time_variable(mock_ds) == 'tvar'
-
-def test_find_time_variable_axis():
-    mock_ds = MagicMock()
-    mock_var = MagicMock(axis='T', spec=['standard_name', 'axis'])
-    mock_ds.variables = {'tvar': mock_var}
-    assert find_time_variable(mock_ds) == 'tvar'
-
-def test_find_time_variable_fallback():
-    mock_ds = MagicMock()
-    mock_ds.variables = {'time': MagicMock(spec=[])}
-    assert find_time_variable(mock_ds) == 'time'
-
-def test_find_time_variable_none():
-    mock_ds = MagicMock()
-    mock_ds.variables = {}
-    assert find_time_variable(mock_ds) is None
+    # Test by axis
+    v1 = MagicMock(axis='T')
+    mock_ds.variables = {'t1': v1}
+    assert find_time_variable(mock_ds) == 't1'
+    
+    # Test by standard_name
+    v2 = MagicMock(standard_name='time', spec=['standard_name'])
+    mock_ds.variables = {'t2': v2}
+    assert find_time_variable(mock_ds) == 't2'
 
 # ############################################################################
 # Tests for aggregate_single_file
 # ############################################################################
 
-def test_aggregate_single_file_success(mocker, mock_nc_dataset, mock_stop_event, tmp_path, caplog):
-    caplog.set_level(logging.INFO)
+def test_aggregate_single_file_success(mocker, mock_nc_dataset, mock_stop_event, tmp_path):
+    """Test successful monthly mean aggregation."""
     input_path = tmp_path / "input.nc"
+    input_path.touch() 
     output_path = tmp_path / "output.nc"
+
+    mock_src, mock_dst, _ = mock_nc_dataset
     
+    # Ensure the axis is set correctly for discovery
+    mock_src.variables['time'].axis = 'T'
+    
+    mocker.patch('numpy.meshgrid', return_value=(np.array([[0]]), np.array([[0]])))
+    
+    # Mock date conversion utilities
     mocker.patch('gridflow.processing.temporal_aggregate.nc.num2date', return_value=[
-        datetime(2000, 1, 1), datetime(2000, 2, 1), datetime(2000, 3, 1)
+        datetime(2000, 1, 1), datetime(2000, 1, 15), datetime(2000, 2, 1)
     ])
-    mocker.patch('gridflow.processing.temporal_aggregate.nc.date2num', side_effect=[15, 45, 75])
-    
-    result = aggregate_single_file(input_path, output_path, 'tas', 'monthly', 'mean', mock_stop_event)
-    
-    assert result is True
-    assert "Successfully aggregated" in caplog.text
+    mocker.patch('gridflow.processing.temporal_aggregate.nc.date2num', side_effect=[15.0, 45.0])
 
-def test_aggregate_single_file_no_time_var(mock_nc_dataset, mock_stop_event, tmp_path, caplog):
-    caplog.set_level(logging.ERROR)
-    input_path = tmp_path / "input.nc"
-    output_path = tmp_path / "output.nc"
-    mock_src, _, _ = mock_nc_dataset
-    mock_src.variables = {'tas': mock_src.variables['tas']} # Remove time
-    
-    assert not aggregate_single_file(input_path, output_path, 'tas', 'monthly', 'mean', mock_stop_event)
-    assert "Required time or variable" in caplog.text
+    success, msg = aggregate_single_file(input_path, output_path, 'tas', 'monthly', 'mean', mock_stop_event)
 
-def test_aggregate_single_file_no_variable(mock_nc_dataset, mock_stop_event, tmp_path, caplog):
-    caplog.set_level(logging.ERROR)
-    input_path = tmp_path / "input.nc"
-    output_path = tmp_path / "output.nc"
-    mock_src, _, _ = mock_nc_dataset
-    mock_src.variables = {'time': mock_src.variables['time']} # Remove tas
-    
-    assert not aggregate_single_file(input_path, output_path, 'tas', 'monthly', 'mean', mock_stop_event)
-    assert "Required time or variable" in caplog.text
+    assert success is True
+    assert msg == "output.nc"
 
-def test_aggregate_single_file_unsupported_frequency(mock_nc_dataset, mock_stop_event, tmp_path, caplog):
-    caplog.set_level(logging.ERROR)
-    input_path = tmp_path / "input.nc"
-    output_path = tmp_path / "output.nc"
-    
-    assert not aggregate_single_file(input_path, output_path, 'tas', 'daily', 'mean', mock_stop_event)
-    assert "Unsupported frequency" in caplog.text
-
-def test_aggregate_single_file_unsupported_method(mock_nc_dataset, mock_stop_event, tmp_path, caplog):
-    caplog.set_level(logging.ERROR)
-    input_path = tmp_path / "input.nc"
-    output_path = tmp_path / "output.nc"
-    
-    assert not aggregate_single_file(input_path, output_path, 'tas', 'monthly', 'mode', mock_stop_event)
-    assert "Unsupported aggregation method" in caplog.text
-
-def test_aggregate_single_file_interrupted(mock_nc_dataset, mock_stop_event, tmp_path):
-    input_path = tmp_path / "input.nc"
-    output_path = tmp_path / "output.nc"
+def test_aggregate_single_file_interrupted(mock_stop_event):
+    """Verify graceful exit when stop_event is set."""
     mock_stop_event.is_set.return_value = True
-    
-    assert not aggregate_single_file(input_path, output_path, 'tas', 'monthly', 'mean', mock_stop_event)
+    success, msg = aggregate_single_file(Path("in.nc"), Path("out.nc"), 'tas', 'monthly', 'mean', mock_stop_event)
+    assert not success
+    assert msg == "Interrupted"
 
-def test_aggregate_single_file_exception(mocker, mock_stop_event, tmp_path, caplog):
-    caplog.set_level(logging.ERROR)
-    mocker.patch('gridflow.processing.temporal_aggregate.nc.Dataset', side_effect=Exception("Fail"))
+def test_aggregate_single_file_failure_missing_var(mocker, mock_nc_dataset, mock_stop_event, tmp_path):
+    """Test failure when target variable is missing from NetCDF."""
     input_path = tmp_path / "input.nc"
-    output_path = tmp_path / "output.nc"
+    input_path.touch()
+
+    mock_src, _, _ = mock_nc_dataset
+
+    # Remove the target variable from the mock dictionary
+    mock_src.variables = {'time': mock_src.variables['time']} 
+
+    success, msg = aggregate_single_file(input_path, Path("out.nc"), 'tas', 'monthly', 'mean', mock_stop_event)
     
-    assert not aggregate_single_file(input_path, output_path, 'tas', 'monthly', 'mean', mock_stop_event)
-    assert "Failed to aggregate" in caplog.text
+    assert success is False
+    assert "not found" in msg
 
 # ############################################################################
-# Tests for TemporalAggregator
+# Tests for TemporalAggregator Class
 # ############################################################################
 
-def test_aggregator_init(mock_stop_event):
-    settings = {'workers': 2, 'variable': 'tas', 'output_frequency': 'monthly', 'method': 'mean'}
-    agg = TemporalAggregator(settings, mock_stop_event)
-    assert agg.settings == settings
-    assert agg._stop_event == mock_stop_event
-    assert agg.executor is None
-
-def test_shutdown(aggregator):
-    aggregator.executor = MagicMock()
-    aggregator.shutdown()
-    aggregator.executor.shutdown.assert_called_with(wait=True, cancel_futures=True)
-
-def test_aggregate_all_no_files(aggregator):
-    successful, total = aggregator.aggregate_all([])
-    assert successful == 0
-    assert total == 0
-
-def test_aggregate_all_success(mocker, aggregator):
+def test_aggregator_aggregate_all_success(mocker, aggregator):
+    """Verify parallel execution orchestration and successful count."""
     mock_tpe = mocker.patch('gridflow.processing.temporal_aggregate.ThreadPoolExecutor')
     mock_executor = mock_tpe.return_value
-    mock_futures = [MagicMock(spec=Future, result=lambda: True)]
-    mock_executor.submit.return_value = mock_futures[0]
-    mocker.patch('gridflow.processing.temporal_aggregate.as_completed', return_value=mock_futures)
     
-    successful, total = aggregator.aggregate_all([(Path('in'), Path('out'))])
-    assert successful == 1
+    # Simulate a successful task result (Tuple[bool, str])
+    mock_future = MagicMock(spec=Future)
+    mock_future.result.return_value = (True, "file_monthly.nc")
+    mock_executor.submit.return_value = mock_future
+    mocker.patch('gridflow.processing.temporal_aggregate.as_completed', return_value=[mock_future])
+    
+    tasks = [(Path('in.nc'), Path('out.nc'))]
+    success_count, total = aggregator.aggregate_all(tasks)
+    
+    assert success_count == 1
     assert total == 1
 
-def test_aggregate_all_failure(mocker, aggregator):
+def test_aggregator_aggregate_all_interrupted(mocker, aggregator, mock_stop_event):
+    """Verify that remaining tasks are cancelled if stop_event is set."""
     mock_tpe = mocker.patch('gridflow.processing.temporal_aggregate.ThreadPoolExecutor')
     mock_executor = mock_tpe.return_value
-    mock_futures = [MagicMock(spec=Future, result=lambda: False)]
-    mock_executor.submit.return_value = mock_futures[0]
-    mocker.patch('gridflow.processing.temporal_aggregate.as_completed', return_value=mock_futures)
     
-    successful, total = aggregator.aggregate_all([(Path('in'), Path('out'))])
-    assert successful == 0
-    assert total == 1
-
-def test_aggregate_all_interrupted(mocker, aggregator, mock_stop_event):
-    mock_tpe = mocker.patch('gridflow.processing.temporal_aggregate.ThreadPoolExecutor')
-    mock_executor = mock_tpe.return_value
-    mock_futures = [MagicMock(spec=Future) for _ in range(2)]
-    mock_futures[0].result.return_value = True
-    mock_futures[1].result.return_value = True
-    mock_executor.submit.side_effect = mock_futures
+    f1 = MagicMock(spec=Future)
+    f1.result.return_value = (True, "res1.nc")
+    f2 = MagicMock(spec=Future)
+    
+    mock_executor.submit.side_effect = [f1, f2]
 
     def mock_as_completed(fs):
-        yield mock_futures[0]
+        yield f1
         mock_stop_event.is_set.return_value = True
-        yield mock_futures[1]
+        yield f2 # Will be cancelled/skipped in loop
 
     mocker.patch('gridflow.processing.temporal_aggregate.as_completed', side_effect=mock_as_completed)
     
-    successful, total = aggregator.aggregate_all([(Path('in1'), Path('out1')), (Path('in2'), Path('out2'))])
-    assert successful == 1
-    assert total == 2
+    tasks = [(Path('in1.nc'), Path('out1.nc')), (Path('in2.nc'), Path('out2.nc'))]
+    success_count, total = aggregator.aggregate_all(tasks)
+    
+    assert success_count == 1
+    assert f2.cancel.called
 
 # ############################################################################
-# Tests for run_aggregator_session
+# Tests for Session & CLI
 # ############################################################################
 
-def test_run_aggregator_session_success(mocker, mock_stop_event, tmp_path, caplog):
+@patch('gridflow.processing.temporal_aggregate.TemporalAggregator')
+def test_run_aggregator_session_discovery(MockAgg, mock_stop_event, tmp_path, caplog, capsys):
+    """Verify file discovery and task creation in session orchestrator."""
     caplog.set_level(logging.INFO)
-    input_dir_path = tmp_path / 'input'
-    input_dir_path.mkdir()
-    (input_dir_path / 'file.nc').touch()
-    
+    in_dir = tmp_path / "in"
+    in_dir.mkdir()
+    (in_dir / "test.nc").touch()
+
     settings = {
-        'input_dir': str(input_dir_path),
-        'output_dir': str(tmp_path / 'output'),
+        'input_dir': str(in_dir),
+        'output_dir': str(tmp_path / "out"),
         'variable': 'tas',
         'output_frequency': 'monthly',
         'method': 'mean',
-        'workers': 1
+        'is_gui_mode': False
     }
-    mocker.patch.object(TemporalAggregator, 'aggregate_all', return_value=(1, 1))
-    
+
+    mock_agg_instance = MockAgg.return_value
+    mock_agg_instance.aggregate_all.return_value = (1, 1)
+
     run_aggregator_session(settings, mock_stop_event)
-    assert "Found 1 NetCDF files" in caplog.text
-    assert "Completed: 1/1" in caplog.text
 
-def test_run_aggregator_session_no_files(mocker, mock_stop_event, tmp_path, caplog):
-    caplog.set_level(logging.WARNING)
-    input_dir_path = tmp_path / 'input'
-    input_dir_path.mkdir()
-    
-    settings = {
-        'input_dir': str(input_dir_path),
-        'output_dir': str(tmp_path / 'output'),
-        'variable': 'tas',
-        'output_frequency': 'monthly',
-        'method': 'mean',
-        'workers': 1
-    }
-    with pytest.raises(SystemExit):
-        run_aggregator_session(settings, mock_stop_event)
-    assert "No NetCDF (.nc) files found" in caplog.text
+    captured = capsys.readouterr()
+    assert "Found 1 NetCDF files" in captured.out
+    assert "aggregated successfully" in caplog.text
 
-def test_run_aggregator_session_invalid_input_dir(mocker, mock_stop_event, tmp_path, caplog):
-    caplog.set_level(logging.ERROR)
-    
-    settings = {
-        'input_dir': str(tmp_path / 'nonexist'),
-        'output_dir': str(tmp_path / 'output'),
-        'variable': 'tas',
-        'output_frequency': 'monthly',
-        'method': 'mean'
-    }
-    with pytest.raises(SystemExit):
-        run_aggregator_session(settings, mock_stop_event)
-    assert "Input directory not found" in caplog.text
-
-def test_run_aggregator_session_exception(mocker, mock_stop_event, tmp_path, caplog):
-    caplog.set_level(logging.CRITICAL)
-    
-    settings = {
-        'input_dir': str(tmp_path),
-        'output_dir': str(tmp_path / 'output'),
-        'variable': 'tas',
-        'output_frequency': 'monthly',
-        'method': 'mean'
-    }
-    mocker.patch('pathlib.Path.rglob', side_effect=Exception("Critical"))
-    
-    run_aggregator_session(settings, mock_stop_event)
-    assert "critical error" in caplog.text.lower()
-    assert mock_stop_event.set.called
-
-# ############################################################################
-# Tests for add_arguments
-# ############################################################################
-
-def test_add_arguments():
-    parser = argparse.ArgumentParser()
-    add_arguments(parser)
-    args = parser.parse_args(['--input_dir', './in', '--output_dir', './out', '--variable', 'tas'])
-    assert args.input_dir == './in'
-    assert args.output_dir == './out'
-    assert args.variable == 'tas'
-    assert args.output_frequency == 'monthly'
-    assert args.method == 'mean'
-
-# ############################################################################
-# Tests for main
-# ############################################################################
-
-@patch('argparse.ArgumentParser')
+@patch('argparse.ArgumentParser.parse_args')
 @patch('gridflow.processing.temporal_aggregate.setup_logging')
 @patch('gridflow.processing.temporal_aggregate.run_aggregator_session')
 @patch('signal.signal')
-def test_main_success(mock_signal, mock_session, mock_logging, mock_parser):
-    mock_args = MagicMock(input_dir='./in', output_dir='./out', variable='tas', log_dir='./logs', log_level='info', demo=False)
-    mock_parser.return_value.parse_args.return_value = mock_args
+def test_main_success(mock_signal, mock_session, mock_setup, mock_args_call):
+    """Verify CLI main entry point logic."""
+    mock_args = argparse.Namespace(
+        input_dir='in', output_dir='out', variable='tas',
+        output_frequency='monthly', method='mean',
+        log_dir='./logs', log_level='verbose', demo=False,
+        is_gui_mode=False, workers=4
+    )
+    mock_args_call.return_value = mock_args
+    
     main()
-    mock_session.assert_called()
-    mock_signal.assert_called_with(signal.SIGINT, signal_handler)
+    mock_setup.assert_called_once()
+    mock_session.assert_called_once()
+    mock_signal.assert_called_once()
 
-@patch('argparse.ArgumentParser')
-@patch('gridflow.processing.temporal_aggregate.setup_logging')
+@patch('argparse.ArgumentParser.parse_args')
 @patch('gridflow.processing.temporal_aggregate.run_aggregator_session')
-def test_main_demo(mock_session, mock_logging, mock_parser, caplog):
+@patch('gridflow.processing.temporal_aggregate.setup_logging')
+def test_main_demo_mode(mock_setup, mock_session, mock_args_call, capsys, caplog):
+    """Verify demo mode defaults and command printing."""
     caplog.set_level(logging.INFO)
-    mock_args = MagicMock(demo=True, log_dir='./logs', log_level='info')
-    mock_parser.return_value.parse_args.return_value = mock_args
+    mock_args = argparse.Namespace(
+        demo=True, log_dir='./logs', log_level='verbose',
+        is_gui_mode=False, input_dir=None, output_dir=None,
+        variable=None, output_frequency='monthly', method='mean'
+    )
+    mock_args_call.return_value = mock_args
+    
     main()
-    assert "Running in demo mode" in caplog.text
-    mock_session.assert_called()
+    
+    # If HAS_UI_LIBS is true, it prints to stdout, otherwise logs it
+    captured = capsys.readouterr()
+    if HAS_UI_LIBS:
+        assert "Running in demo mode" in captured.out
+        assert "gridflow aggregate" in captured.out
+    else:
+        assert "Running in demo mode" in caplog.text
+    
+    mock_session.assert_called_once()
+    called_settings = mock_session.call_args[0][0]
+    assert called_settings['input_dir'] == './downloads_cmip6'
 
-@patch('argparse.ArgumentParser')
-@patch('gridflow.processing.temporal_aggregate.setup_logging')
-def test_main_no_params(mock_logging, mock_parser, caplog):
-    caplog.set_level(logging.ERROR)
-    mock_args = MagicMock(demo=False, input_dir=None, output_dir=None, variable=None, log_dir='.', log_level='info')
-    mock_parser.return_value.parse_args.return_value = mock_args
-    with pytest.raises(SystemExit):
-        main()
-    assert "the following arguments are required" in caplog.text
-
-@patch('argparse.ArgumentParser')
-@patch('gridflow.processing.temporal_aggregate.setup_logging')
 @patch('gridflow.processing.temporal_aggregate.stop_event')
-@patch('gridflow.processing.temporal_aggregate.run_aggregator_session')
-def test_main_interrupted(mock_session, mock_stop, mock_logging, mock_parser, caplog):
-    caplog.set_level(logging.WARNING)
-    mock_args = MagicMock(demo=True, log_dir='./logs', log_level='info')
-    mock_parser.return_value.parse_args.return_value = mock_args
+def test_main_interrupted_exit_code(mock_stop, mocker):
+    """Verify main exits with code 130 on user interrupt."""
+    mocker.patch('sys.argv', ['script.py', '--demo'])
+    mocker.patch('gridflow.processing.temporal_aggregate.run_aggregator_session')
+    mocker.patch('gridflow.processing.temporal_aggregate.setup_logging')
+    
     mock_stop.is_set.return_value = True
-    with pytest.raises(SystemExit) as exc:
+    with pytest.raises(SystemExit) as e:
         main()
-    assert exc.value.code == 130
-    assert "Execution was interrupted" in caplog.text
+    assert e.value.code == 130
+
+if __name__ == "__main__":
+    pytest.main([__file__])

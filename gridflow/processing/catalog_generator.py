@@ -19,6 +19,7 @@ import json
 import signal
 import logging
 import threading
+import warnings
 from pathlib import Path
 from typing import List, Dict, Any
 
@@ -29,14 +30,25 @@ except ImportError as e:
     print(f"FATAL: Missing required library: {e.name}. Please install it using 'pip install {e.name}'.")
     sys.exit(1)
 
+try:
+    from tqdm import tqdm
+    from rich.console import Console
+    HAS_UI_LIBS = True
+except ImportError:
+    HAS_UI_LIBS = False
+
 # --- Local Imports ---
 try:
     from gridflow.utils.logging_utils import setup_logging
 except ImportError:
-    print("FATAL: logging_utils.py not found. Please ensure it is in the same directory.")
-    sys.exit(1)
+    # Fallback if module is run standalone
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+    def setup_logging(*args, **kwargs): pass
 
-# --- Global Stop Event for Graceful Shutdown ---
+# --- Suppress known warnings ---
+warnings.filterwarnings("ignore", category=DeprecationWarning)
+
+# --- Global Stop Event ---
 stop_event = threading.Event()
 
 def signal_handler(sig, frame):
@@ -72,80 +84,122 @@ class Cataloger:
         self.included_count = 0
 
     def find_and_deduplicate_files(self) -> List[Path]:
-        """Recursively finds all .nc files and handles duplicates."""
+        """Recursively finds all .nc files and handles duplicates with UI feedback."""
         input_dir = Path(self.settings['input_dir'])
-        logging.info(f"Searching for NetCDF files in {input_dir}...")
-        all_files = list(input_dir.rglob("*.nc"))
+        is_gui_mode = self.settings.get('is_gui_mode', False)
+        use_rich = HAS_UI_LIBS and not is_gui_mode
         
-        if not all_files:
-            return []
+        status_context = None
+        if use_rich:
+            console = Console()
+            status_context = console.status(f"[bold green]Searching for NetCDF files in {input_dir}...", spinner="dots")
+            status_context.start()
+        else:
+            logging.info(f"Searching for NetCDF files in {input_dir}...")
 
-        # Group files by a base name to find duplicates
-        files_by_base_name = {}
-        for f_path in all_files:
-            base_name = self._get_base_filename(f_path.name)
-            if base_name not in files_by_base_name:
-                files_by_base_name[base_name] = []
-            files_by_base_name[base_name].append(f_path)
+        try:
+            all_files = list(input_dir.rglob("*.nc"))
             
-        unique_files = []
-        for base_name, file_list in files_by_base_name.items():
-            if self._stop_event.is_set(): break
-            if len(file_list) == 1:
-                unique_files.append(file_list[0])
-            else:
-                # Prefer non-prefixed filenames if multiple exist
-                preferred_file = next((f for f in file_list if self._is_non_prefixed(f.name)), file_list[0])
-                unique_files.append(preferred_file)
-                for f in file_list:
-                    if f != preferred_file:
-                        self.duplicates.append(str(f))
-                        logging.warning(f"Duplicate found for base name '{base_name}': Using '{preferred_file.name}', ignoring '{f.name}'.")
-        
-        return unique_files
+            if not all_files:
+                return []
+
+            # Group files by a base name to find duplicates
+            files_by_base_name = {}
+            for f_path in all_files:
+                base_name = self._get_base_filename(f_path.name)
+                if base_name not in files_by_base_name:
+                    files_by_base_name[base_name] = []
+                files_by_base_name[base_name].append(f_path)
+                
+            unique_files = []
+            for base_name, file_list in files_by_base_name.items():
+                if self._stop_event.is_set(): break
+                
+                if len(file_list) == 1:
+                    unique_files.append(file_list[0])
+                else:
+                    # Prefer non-prefixed filenames if multiple exist
+                    preferred_file = next((f for f in file_list if self._is_non_prefixed(f.name)), file_list[0])
+                    unique_files.append(preferred_file)
+                    for f in file_list:
+                        if f != preferred_file:
+                            self.duplicates.append(str(f))
+                            logging.debug(f"Duplicate found for base name '{base_name}': Using '{preferred_file.name}', ignoring '{f.name}'.")
+            
+            return unique_files
+            
+        finally:
+            if status_context:
+                status_context.stop()
 
     def generate(self):
         """Main method to orchestrate the catalog generation process."""
         unique_files = self.find_and_deduplicate_files()
         
         if not unique_files:
+            msg = f"No NetCDF files found in {self.settings['input_dir']}."
             if self.settings.get('demo'):
-                logging.critical(f"No NetCDF files found in {self.settings['input_dir']}. Run a downloader script with '--demo' to get sample files.")
+                logging.warning(f"{msg} Run a downloader script with '--demo' to get sample files.")
             else:
-                logging.warning(f"No NetCDF files found in {self.settings['input_dir']} or its subdirectories.")
+                logging.warning(msg)
             return
 
-        logging.info(f"Found {len(unique_files)} unique files to process.")
+        is_gui_mode = self.settings.get('is_gui_mode', False)
+        use_tqdm = HAS_UI_LIBS and not is_gui_mode
+        total_files = len(unique_files)
+
+        if use_tqdm:
+            Console().print(f"[bold blue]Cataloging:[/] Found {total_files} unique files to process.")
+        else:
+            logging.info(f"Found {total_files} unique files to process.")
         
-        # Process files sequentially to avoid netCDF4 thread-safety issues
-        for i, file_path in enumerate(unique_files):
+        # Setup iterator
+        files_iter = unique_files
+        if use_tqdm:
+            files_iter = tqdm(
+                unique_files, 
+                total=total_files, 
+                unit="file", 
+                desc="Processing", 
+                ncols=90, 
+                bar_format='  {l_bar}{bar}{r_bar}'
+            )
+
+        for i, file_path in enumerate(files_iter):
             if self._stop_event.is_set():
                 logging.info("Catalog generation stopped by user.")
                 break
 
-            logging.info(f"Processing file {i + 1}/{len(unique_files)}: {file_path.name}")
+            if is_gui_mode:
+                logging.info(f"Progress: {i + 1}/{total_files} files processed.")
+
             result = extract_metadata_from_file(file_path)
-            self._process_metadata_result(result)
+            success = self._process_metadata_result(result)
+            
+            if not success and use_tqdm:
+                tqdm.write(f"  ✖ Skipped {file_path.name}")
+            elif not success:
+                logging.warning(f"Skipped {file_path.name}")
 
         self._save_results()
 
-    def _process_metadata_result(self, result: Dict):
-        """Processes a single metadata dictionary and updates the catalog."""
+    def _process_metadata_result(self, result: Dict) -> bool:
+        """Processes a single metadata dictionary. Returns True if included, False if skipped."""
         file_path = result["file_path"]
         metadata = result["metadata"]
         error = result.get("error")
 
         if error:
-            logging.error(f"Skipping {Path(file_path).name}: {error}")
+            logging.debug(f"Skipping {Path(file_path).name}: {error}")
             self.skipped_count += 1
-            return
+            return False
 
         required_keys = ["activity_id", "source_id", "variant_label", "variable_id"]
         if not all(metadata.get(key) for key in required_keys):
             missing = [key for key in required_keys if not metadata.get(key)]
-            logging.warning(f"Skipping {Path(file_path).name}: Incomplete metadata (missing: {', '.join(missing)}).")
+            logging.debug(f"Skipping {Path(file_path).name}: Incomplete metadata (missing: {', '.join(missing)}).")
             self.skipped_count += 1
-            return
+            return False
             
         # Build catalog key
         key = f"{metadata['activity_id']}:{metadata['source_id']}:{metadata['variant_label']}"
@@ -160,21 +214,17 @@ class Cataloger:
             }
             
         variable_id = metadata["variable_id"]
-        # --- THIS IS THE FIX ---
-        # If the variable isn't in the catalog for this group yet,
-        # initialize its entry as a dictionary containing a count and a file list.
+
         if variable_id not in self.catalog[key]["variables"]:
             self.catalog[key]["variables"][variable_id] = {
                 "file_count": 0,
                 "files": []
             }
         
-        # Append the file path and increment the count.
         self.catalog[key]["variables"][variable_id]["files"].append(str(file_path))
         self.catalog[key]["variables"][variable_id]["file_count"] += 1
-        # --- END OF FIX ---
-        
         self.included_count += 1
+        return True
 
     def _save_results(self):
         """Saves the generated catalog and duplicates list to JSON files."""
@@ -200,7 +250,15 @@ class Cataloger:
             except IOError as e:
                 logging.error(f"Failed to save duplicates list: {e}")
         
-        logging.info(f"Summary: Included {self.included_count} files in catalog. Skipped {self.skipped_count} files. Found {len(self.duplicates)} duplicates.")
+        summary = f"Summary: Included {self.included_count} files in catalog. Skipped {self.skipped_count} files."
+        if self.duplicates:
+            summary += f" Found {len(self.duplicates)} duplicates."
+        
+        is_gui_mode = self.settings.get('is_gui_mode', False)
+        if HAS_UI_LIBS and not is_gui_mode:
+             Console().print(f"[bold green]{summary}[/]")
+        else:
+            logging.info(summary)
 
     @staticmethod
     def _is_non_prefixed(filename: str) -> bool:
@@ -219,11 +277,25 @@ class Cataloger:
 
 def run_catalog_session(settings: Dict[str, Any], stop_event: threading.Event):
     """Sets up and executes a catalog generation session."""
+    is_gui_mode = settings.get('is_gui_mode', False)
+    
     try:
+        # Validate Inputs
+        input_dir = Path(settings['input_dir'])
+        if not input_dir.is_dir():
+             logging.error(f"Input directory not found: {input_dir}")
+             if not is_gui_mode: sys.exit(1)
+             return
+
         cataloger = Cataloger(settings, stop_event)
         cataloger.generate()
+
+        if stop_event.is_set():
+            logging.warning("Process was stopped before completion.")
+
     except Exception as e:
-        logging.critical(f"A critical error occurred during the session: {e}", exc_info=True)
+        logging.info(f"Failed: A critical error occurred. See log file for details.")
+        logging.debug(f"Full critical error trace: {e}", exc_info=True)
         stop_event.set()
 
 def add_arguments(parser):
@@ -231,41 +303,54 @@ def add_arguments(parser):
     io_group = parser.add_argument_group('Input and Output')
     settings_group = parser.add_argument_group('Processing Settings')
 
-    io_group.add_argument("--input_dir", help="Directory containing NetCDF files (searched recursively). Required if not in demo mode.")
-    io_group.add_argument("--output_dir", help="Directory to save catalog.json and duplicates.json. Required if not in demo mode.")
+    io_group.add_argument("-i", "--input_dir", help="Directory containing NetCDF files (searched recursively).")
+    io_group.add_argument("-o", "--output_dir", help="Directory to save catalog.json.")
 
-    settings_group.add_argument("--log-dir", default="./gridflow_logs", help="Directory to save log files.")
-    settings_group.add_argument("--log-level", default="verbose", choices=["minimal", "verbose", "debug"], help="Set logging verbosity.")
-    settings_group.add_argument("--workers", type=int, default=os.cpu_count() or 4, help="Number of parallel workers (not currently used).")
+    settings_group.add_argument("-ld", "--log-dir", default="./gridflow_logs", help="Log directory.")
+    settings_group.add_argument("-ll", "--log-level", default="minimal", choices=["minimal", "verbose", "debug"], help="Log verbosity.")
     settings_group.add_argument("--demo", action="store_true", help="Run with demo defaults.")
 
 def main(args=None):
-    """Main entry point for the Catalog Generator CLI."""
+    """Main entry point with Rich-enhanced reporting."""
     if args is None:
         import argparse
         parser = argparse.ArgumentParser(description="NetCDF Catalog Generator", formatter_class=argparse.ArgumentDefaultsHelpFormatter)
         add_arguments(parser)
         args = parser.parse_args()
     
-    setup_logging(args.log_dir, args.log_level, prefix="catalog_generator")
-    signal.signal(signal.SIGINT, signal_handler)
+    # FIX: Only set up logging if NOT in GUI mode
+    if not getattr(args, 'is_gui_mode', False):
+        setup_logging(args.log_dir, args.log_level, prefix="catalog_generator")
+        signal.signal(signal.SIGINT, signal_handler)
+
+    active_stop_event = getattr(args, 'stop_event', stop_event)
     
     settings = vars(args)
-    if args.demo:
-        logging.info("Running in demo mode.")
-        settings['input_dir'] = settings.get('input_dir') or './downloads_cmip6'
-        settings['output_dir'] = settings.get('output_dir') or './catalog_cmip6'
-        logging.info(f"Demo mode will use input '{settings['input_dir']}' and output to '{settings['output_dir']}'.")
-    else:
-        if not all([args.input_dir, args.output_dir]):
-            logging.error("--input_dir and --output_dir are required when not in --demo mode.")
-            sys.exit(1)
+    is_gui_mode = settings.get('is_gui_mode', False)
 
-    run_catalog_session(settings, stop_event)
+    if args.demo:
+        settings['input_dir'] = './downloads_cmip6'
+        settings['output_dir'] = './catalog_cmip6'
+        
+        demo_cmd = "gridflow catalog -i ./downloads_cmip6 -o ./catalog_cmip6"
+
+        if HAS_UI_LIBS and not is_gui_mode:
+            console = Console()
+            console.print(f"[bold yellow]Running in demo mode.[/]")
+            console.print(f"Demo Command:\n  [dim]{demo_cmd}[/dim]\n")
+        else:
+            logging.info(f"Running in demo mode.\nDemo Command: {demo_cmd}")
+    else:
+        if not all([settings.get('input_dir'), settings.get('output_dir')]):
+            logging.error("Required arguments missing: --input_dir and --output_dir (or use --demo)")
+            if not is_gui_mode: sys.exit(1)
+            return
+
+    run_catalog_session(settings, active_stop_event)
     
-    if stop_event.is_set():
-        logging.warning("Execution was interrupted.")
-        sys.exit(130)
+    if active_stop_event.is_set():
+        logging.info("Execution was interrupted.")
+        if not is_gui_mode: sys.exit(130)
     
     logging.info("Process finished.")
 

@@ -15,13 +15,14 @@
 
 import os
 import sys
+import json
 import signal
 import logging
 import threading
 import warnings
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import List, Dict, Tuple, Any, Callable
+from typing import List, Dict, Tuple, Any, Callable, Optional
 
 # --- Dependency Check ---
 try:
@@ -31,38 +32,27 @@ except ImportError as e:
     print(f"FATAL: Missing required library: {e.name}. Please install it using 'pip install {e.name}'.")
     sys.exit(1)
 
+try:
+    from tqdm import tqdm
+    from rich.console import Console
+    HAS_UI_LIBS = True
+except ImportError:
+    HAS_UI_LIBS = False
+
 # --- Local Imports ---
 try:
     from gridflow.utils.logging_utils import setup_logging
 except ImportError:
-    print("FATAL: logging_utils.py not found. Please ensure it is in the same directory.")
-    sys.exit(1)
+    # Fallback for standalone execution
+    logging.basicConfig(level=logging.INFO, format='%(levelname)-8s %(asctime)s: %(message)s')
+    def setup_logging(*args, **kwargs): pass
 
-# --- Suppress known warnings ---
+# --- Constants & Conversion Logic ---
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 
-# --- Global Stop Event for Graceful Shutdown ---
-stop_event = threading.Event()
-
-def signal_handler(sig, frame):
-    """Handles SIGINT (Ctrl+C) to gracefully shut down the application."""
-    logging.warning("Stop signal received! Gracefully shutting down...")
-    stop_event.set()
-    logging.info("Please wait for ongoing tasks to complete.")
-
-# --- Conversion Logic ---
-
-def k_to_c(data):
-    """Kelvin to Celsius"""
-    return data - 273.15
-
-def flux_to_mm_day(data):
-    """kg m-2 s-1 to mm/day"""
-    return data * 86400
-
-def m_s_to_km_h(data):
-    """m/s to km/h"""
-    return data * 3.6
+def k_to_c(data): return data - 273.15
+def flux_to_mm_day(data): return data * 86400
+def m_s_to_km_h(data): return data * 3.6
 
 CONVERSIONS: Dict[str, Dict[str, Tuple[Callable, str]]] = {
     'tas': {'C': (k_to_c, 'K')},
@@ -72,184 +62,262 @@ CONVERSIONS: Dict[str, Dict[str, Tuple[Callable, str]]] = {
     'sfcWind': {'km/h': (m_s_to_km_h, 'm s-1')},
 }
 
-def convert_single_file(
-    input_path: Path,
-    output_path: Path,
-    variable: str,
-    target_unit: str,
-    stop_event: threading.Event
-) -> bool:
-    """Converts the units of a variable in a single NetCDF file."""
-    if stop_event.is_set(): return False
-    
-    try:
-        # Check if a valid conversion exists
-        conversion_info = CONVERSIONS.get(variable, {}).get(target_unit)
-        if not conversion_info:
-            logging.error(f"No conversion defined for variable '{variable}' to target unit '{target_unit}'. Skipping {input_path.name}.")
-            return False
+# --- Global Stop Event and Threading Lock ---
+stop_event = threading.Event()
+NETCDF_LOCK = threading.Lock()
 
-        conversion_func, source_unit_pattern = conversion_info
-        
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        with nc.Dataset(input_path, 'r') as src:
-            if variable not in src.variables:
-                logging.warning(f"Variable '{variable}' not found in {input_path.name}. Skipping.")
-                return False
-            
-            src_var = src.variables[variable]
-            current_unit = getattr(src_var, 'units', '').strip()
+def signal_handler(sig, frame):
+    """Handles SIGINT (Ctrl+C)."""
+    logging.warning("Stop signal received! Gracefully shutting down...")
+    stop_event.set()
 
-            if source_unit_pattern not in current_unit:
-                logging.error(f"Source unit mismatch in {input_path.name}. Expected '{source_unit_pattern}', found '{current_unit}'. Skipping.")
-                return False
+class FileManager:
+    """Handles file discovery and directory management."""
+    def __init__(self, input_dir: str, output_dir: str):
+        self.input_dir = Path(input_dir)
+        self.output_dir = Path(output_dir)
+        try:
+            if not self.input_dir.exists():
+                raise FileNotFoundError(f"Input directory not found: {self.input_dir}")
+            self.output_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            logging.error(f"File system error: {e}")
+            sys.exit(1)
 
-            with nc.Dataset(output_path, 'w', format=src.file_format) as dst:
-                # Copy metadata and dimensions
-                dst.setncatts(src.__dict__)
-                dst.setncattr("unit_conversion_details", f"Variable '{variable}' converted from '{current_unit}' to '{target_unit}'.")
-                for name, dim in src.dimensions.items():
-                    dst.createDimension(name, len(dim) if not dim.isunlimited() else None)
+    def get_netcdf_files(self) -> List[Path]:
+        """Recursively finds all .nc files."""
+        return list(self.input_dir.rglob("*.nc"))
 
-                # Copy variables, converting the target one
-                for name, var in src.variables.items():
-                    if stop_event.is_set(): return False
-                    fill_value = var.getncattr('_FillValue') if '_FillValue' in var.ncattrs() else None
-                    dst_var = dst.createVariable(name, var.dtype, var.dimensions, fill_value=fill_value)
-                    attrs_to_copy = {k: var.getncattr(k) for k in var.ncattrs() if k != '_FillValue'}
-                    dst_var.setncatts(attrs_to_copy)
-                    
-                    if name == variable:
-                        logging.debug(f"Applying conversion to '{name}' in {input_path.name}.")
-                        converted_data = conversion_func(var[:])
-                        dst_var[:] = converted_data
-                        dst_var.units = target_unit
-                    else:
-                        dst_var[:] = var[:]
-                        
-        logging.info(f"Successfully converted '{variable}' in {input_path.name} to {output_path.name}")
-        return True
-    except Exception as e:
-        logging.error(f"Failed to convert {input_path.name}: {e}", exc_info=True)
-        if output_path.exists(): output_path.unlink(missing_ok=True)
-        return False
+    def get_output_path(self, input_path: Path) -> Path:
+        """Generates the output path preserving sub-structures."""
+        rel_path = input_path.relative_to(self.input_dir)
+        out_path = self.output_dir / rel_path.parent / f"{input_path.stem}_converted.nc"
+        return out_path
 
-class UnitConverter:
-    """Manages the parallel unit conversion of NetCDF files."""
-    def __init__(self, settings: Dict[str, Any], stop_event: threading.Event):
-        self.settings = settings
+class Converter:
+    """Manages the NetCDF unit conversion logic and parallel execution."""
+    def __init__(self, file_manager: FileManager, stop_event: threading.Event, **settings):
+        self.file_manager = file_manager
         self._stop_event = stop_event
+        self.settings = settings
         self.executor = None
 
-    def shutdown(self):
-        if self.executor:
-            self.executor.shutdown(wait=True, cancel_futures=True)
-        logging.info("Converter has been shut down.")
+    def convert_file(self, input_path: Path) -> Tuple[bool, str]:
+        """Processes a single file with unit conversion."""
+        if self._stop_event.is_set(): return False, "Interrupted"
+        
+        output_path = self.file_manager.get_output_path(input_path)
+        variable = self.settings['variable']
+        target_unit = self.settings['target_unit']
 
-    def convert_all(self, files_to_convert: List[Tuple[Path, Path]]) -> Tuple[int, int]:
-        """Manages the parallel conversion of a list of files."""
-        successful_conversions = 0
-        if not files_to_convert: return 0, 0
-        
-        self.executor = ThreadPoolExecutor(max_workers=self.settings['workers'], thread_name_prefix='Converter')
-        future_to_file = {
-            self.executor.submit(convert_single_file, in_path, out_path, self.settings['variable'], self.settings['target_unit'], self._stop_event): in_path
-            for in_path, out_path in files_to_convert
-        }
-        
-        total_files = len(files_to_convert)
         try:
-            for i, future in enumerate(as_completed(future_to_file)):
-                logging.info(f"Progress: {i + 1}/{total_files} files processed.")
-                if self._stop_event.is_set(): break
-                if future.result():
-                    successful_conversions += 1
-        finally:
-            self.shutdown()
-        
-        return successful_conversions, total_files
+            conv_info = CONVERSIONS.get(variable, {}).get(target_unit)
+            if not conv_info:
+                return False, f"No conversion defined for {variable} to {target_unit}"
 
-def run_conversion_session(settings: Dict[str, Any], stop_event: threading.Event):
-    """Sets up and executes a unit conversion session."""
+            conv_func, source_unit_pattern = conv_info
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+
+            with NETCDF_LOCK:
+                if self._stop_event.is_set(): return False, "Interrupted"
+
+                with nc.Dataset(input_path, 'r') as src:
+                    if variable not in src.variables:
+                        return False, f"Variable '{variable}' not found"
+                    
+                    src_var = src.variables[variable]
+                    current_unit = getattr(src_var, 'units', '').strip()
+
+                    if source_unit_pattern not in current_unit:
+                        return False, f"Unit mismatch: Expected {source_unit_pattern}, found {current_unit}"
+
+                    with nc.Dataset(output_path, 'w', format=src.file_format) as dst:
+                        dst.setncatts(src.__dict__)
+                        dst.setncattr("unit_conversion", f"From {current_unit} to {target_unit}")
+                        
+                        for name, dim in src.dimensions.items():
+                            dst.createDimension(name, len(dim) if not dim.isunlimited() else None)
+
+                        for name, var in src.variables.items():
+                            if self._stop_event.is_set(): return False, "Interrupted"
+                            
+                            fill_value = var.getncattr('_FillValue') if '_FillValue' in var.ncattrs() else None
+                            dst_var = dst.createVariable(name, var.dtype, var.dimensions, fill_value=fill_value)
+                            dst_var.setncatts({k: var.getncattr(k) for k in var.ncattrs() if k != '_FillValue'})
+                            
+                            if name == variable:
+                                dst_var[:] = conv_func(var[:])
+                                dst_var.units = target_unit
+                            else:
+                                dst_var[:] = var[:]
+                                
+            return True, f"Converted: {output_path.name}"
+        except Exception as e:
+            if output_path.exists(): output_path.unlink(missing_ok=True)
+            return False, str(e)
+
+    def process_all(self, files: List[Path]) -> Tuple[int, int]:
+        """Executes parallel processing."""
+        if not files: return 0, 0
+        
+        successful = 0
+        total = len(files)
+        workers = self.settings.get('workers', 4)
+        
+        start_msg = f"Starting unit conversion for {total} files..."
+        is_gui_mode = self.settings.get('is_gui_mode', False)
+        
+        if HAS_UI_LIBS and not is_gui_mode:
+            from rich.console import Console
+            Console().print(f"[bold blue]{start_msg}[/]")
+        else:
+            logging.info(start_msg)
+
+        self.executor = ThreadPoolExecutor(max_workers=workers, thread_name_prefix='Converter')
+        future_to_file = {self.executor.submit(self.convert_file, f): f for f in files}
+        
+        use_tqdm = HAS_UI_LIBS and not is_gui_mode
+        futures_iter = as_completed(future_to_file)
+
+        if use_tqdm:
+            futures_iter = tqdm(futures_iter, total=total, unit="file", desc="Converting Units", ncols=90)
+
+        try:
+            for i, future in enumerate(futures_iter):
+                if self._stop_event.is_set(): break
+                
+                if is_gui_mode:
+                    logging.info(f"Progress: {i + 1}/{total} files processed.")
+
+                orig_path = future_to_file[future]
+                try:
+                    success, msg = future.result()
+                    if success:
+                        successful += 1
+                        if use_tqdm: tqdm.write(f"  ✔ {msg}")
+                        elif is_gui_mode: logging.info(msg)
+                    else:
+                        if use_tqdm: tqdm.write(f"  ✖ Failed {orig_path.name}: {msg}")
+                        elif is_gui_mode: logging.warning(f"Failed {orig_path.name}: {msg}")
+                except Exception as e:
+                    logging.error(f"Error processing {orig_path.name}: {e}")
+        finally:
+            self.executor.shutdown(wait=True, cancel_futures=True)
+        
+        return successful, total
+
+def load_config(config_path: str) -> Dict:
+    """Loads JSON configuration."""
     try:
-        input_dir = Path(settings['input_dir'])
-        output_dir = Path(settings['output_dir'])
+        with open(config_path, 'r', encoding='utf-8') as f: return json.load(f)
+    except Exception as e:
+        logging.error(f"Failed to load config: {e}")
+        return {}
+
+def create_conversion_session(settings: Dict[str, Any], stop_event: threading.Event):
+    """Orchestrates the conversion session."""
+    is_gui_mode = settings.get('is_gui_mode', False)
+    use_rich = HAS_UI_LIBS and not is_gui_mode
+    
+    try:
+        file_manager = FileManager(settings['input_dir'], settings['output_dir'])
+        nc_files = file_manager.get_netcdf_files()
         
-        if not input_dir.is_dir():
-            logging.error(f"Input directory not found: {input_dir}")
-            sys.exit(1)
-        
-        nc_files = list(input_dir.rglob("*.nc"))
         if not nc_files:
-            logging.warning(f"No NetCDF (.nc) files found in {input_dir} or its subdirectories.")
-            sys.exit(0)
+            logging.warning(f"No NetCDF files found in {settings['input_dir']}")
+            if not is_gui_mode: sys.exit(0)
+            return
             
-        logging.info(f"Found {len(nc_files)} NetCDF files to process for unit conversion.")
+        status_msg = f"Initializing unit conversion for {len(nc_files)} files..."
         
-        tasks = [(p, output_dir / f"{p.stem}_converted.nc") for p in nc_files]
-        
-        converter = UnitConverter(settings, stop_event)
-        successful_conversions, total_files = converter.convert_all(tasks)
+        settings.pop('stop_event', None)
+        settings.pop('stop_flag', None)
+
+        if use_rich:
+            console = Console()
+            with console.status(f"[bold green]{status_msg}", spinner="dots"):
+                converter = Converter(file_manager, stop_event, **settings)
+        else:
+            logging.info(status_msg)
+            converter = Converter(file_manager, stop_event, **settings)
+
+        successful, total = converter.process_all(nc_files)
 
         if stop_event.is_set():
-            logging.warning("Process was stopped before completion.")
+            logging.warning("Process was interrupted.")
         
-        logging.info(f"Completed: {successful_conversions}/{total_files} files converted successfully.")
-
+        logging.info(f"Completed: {successful}/{total} files converted successfully.")
     except Exception as e:
-        logging.critical(f"A critical error occurred during the session: {e}", exc_info=True)
+        logging.critical(f"Critical session error: {e}", exc_info=True)
         stop_event.set()
 
 def add_arguments(parser):
-    """Add unit conversion arguments to the provided parser."""
+    """CLI Argument groups."""
     io_group = parser.add_argument_group('Input and Output')
     conv_group = parser.add_argument_group('Conversion Parameters')
     settings_group = parser.add_argument_group('Processing Settings')
 
-    io_group.add_argument("--input_dir", help="Directory containing input NetCDF files.")
-    io_group.add_argument("--output_dir", help="Directory to save converted files.")
-    
-    conv_group.add_argument("--variable", help="Name of the variable to convert (e.g., 'tas', 'pr').")
-    conv_group.add_argument("--target_unit", help="Target unit to convert to (e.g., 'C', 'mm/day', 'km/h').")
-    
-    settings_group.add_argument("--log-dir", default="./gridflow_logs", help="Directory to save log files.")
-    settings_group.add_argument("--log-level", default="verbose", choices=["minimal", "verbose", "debug"], help="Set logging verbosity.")
-    settings_group.add_argument("--workers", type=int, default=os.cpu_count() or 4, help="Number of parallel workers.")
+    io_group.add_argument("-i", "--input_dir", help="Input directory.")
+    io_group.add_argument("-o", "--output_dir", help="Output directory.")
+
+    conv_group.add_argument("--variable", help="Variable (e.g., 'tas', 'pr').")
+    conv_group.add_argument("--target_unit", help="Target unit (e.g., 'C', 'mm/day').")
+
+    settings_group.add_argument("-ld", "--log-dir", default="./gridflow_logs", help="Log directory.")
+    settings_group.add_argument("-ll", "--log-level", default="verbose", choices=["minimal", "verbose", "debug"])
+    settings_group.add_argument("-w", "--workers", type=int, default=os.cpu_count() or 4)
     settings_group.add_argument("--demo", action="store_true", help="Run with demo defaults.")
+    settings_group.add_argument("-c", "--config", help="Path to JSON config.")
 
 def main(args=None):
-    """Main entry point for the Unit Converter CLI."""
     if args is None:
         import argparse
-        parser = argparse.ArgumentParser(description="Unit Converter for NetCDF Files", formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+        parser = argparse.ArgumentParser(description="GridFlow Unit Converter", formatter_class=argparse.ArgumentDefaultsHelpFormatter)
         add_arguments(parser)
         args = parser.parse_args()
-    
-    setup_logging(args.log_dir, args.log_level, prefix="unit_converter")
-    signal.signal(signal.SIGINT, signal_handler)
-    
-    settings = vars(args)
-    if args.demo:
-        logging.info("Running in demo mode.")
-        settings['input_dir'] = './downloads_cmip6'
-        settings['output_dir'] = './unit-converted_cmip6'
-        settings['variable'] = 'tas'
-        settings['target_unit'] = 'C'
-        logging.info(f"Demo will use input '{settings['input_dir']}', output to '{settings['output_dir']}', and convert '{settings['variable']}' to '{settings['target_unit']}'.")
-    else:
-        required_args = ['input_dir', 'output_dir', 'variable', 'target_unit']
-        if not all(settings.get(arg) for arg in required_args):
-            logging.error("the following arguments are required when not in --demo mode: --input_dir, --output_dir, --variable, --target_unit")
-            sys.exit(1)
 
-    run_conversion_session(settings, stop_event)
-    
-    if stop_event.is_set():
-        logging.warning("Execution was interrupted.")
-        sys.exit(130)
-    
-    logging.info("Process finished.")
+    # FIX: Only set up logging if NOT in GUI mode
+    if not getattr(args, "is_gui_mode", False):
+        setup_logging(args.log_dir, args.log_level, prefix="unit_converter")
+        signal.signal(signal.SIGINT, signal_handler)
+
+    active_stop_event = getattr(args, "stop_event", stop_event)
+
+    config = load_config(args.config) if args.config else {}
+    cli_args = {k: v for k, v in vars(args).items() if v is not None}
+    settings = {**config, **cli_args}
+
+    if settings.get('demo'):
+        settings.update({
+            "input_dir": "./downloads_cmip6", 
+            "output_dir": "./unit_converted", 
+            "variable": "tas", 
+            "target_unit": "C"
+        })
+
+        demo_cmd = (
+            "gridflow convert "
+            "-i ./downloads_cmip6 "
+            "-o ./unit_converted "
+            "--variable tas "
+            "--target_unit C"
+        )
+
+        if HAS_UI_LIBS and not getattr(args, 'is_gui_mode', False):
+            console = Console()
+            console.print(f"[bold yellow]Running in demo mode with a pre-defined query.[/]")
+            console.print(f"Demo Command:\n  [dim]{demo_cmd}[/dim]\n")
+        else:
+            logging.info(f"Demo Command:\n  {demo_cmd}\n")
+    else:
+        for req in ["input_dir", "output_dir", "variable", "target_unit"]:
+            if not settings.get(req):
+                logging.error(f"Argument --{req} is required.")
+                if not settings.get("is_gui_mode"): sys.exit(1)
+                return
+
+    create_conversion_session(settings, active_stop_event)
+    if active_stop_event.is_set() and not settings.get("is_gui_mode"): sys.exit(130)
 
 if __name__ == "__main__":
     main()
-

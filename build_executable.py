@@ -43,7 +43,7 @@ if __name__ == '__main__':
     # Directories containing data files to be bundled
     data_directories_to_bundle = [
         'gridflow/vocab',
-        'iowa_border',
+        'conus_border',
         'gridflow_logo.svg' # Also bundle the svg logo
     ]
 

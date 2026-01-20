@@ -1,270 +1,583 @@
 # gridflow/download/era5_downloader.py
 # Copyright (c) 2025 Bhuwan Shah
-#
-# This program is free software: you can redistribute it and/or modify
-# it under the terms of the GNU Affero General Public License as published by
-# the Free Software Foundation, either version 3 of the License, or
-# (at your option) any later version.
-#
-# This program is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-# GNU Affero General Public License for more details.
-#
-# You should have received a copy of the GNU Affero General Public License
-# along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-import os
 import sys
+import json
+import time
 import signal
 import logging
 import threading
 from pathlib import Path
 from datetime import datetime
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import List, Dict, Any, Tuple
+from dateutil.relativedelta import relativedelta
+from concurrent.futures import ThreadPoolExecutor, as_completed, Future
+from typing import List, Dict, Optional, Tuple, Any, Union
 
 # --- Dependency Check ---
 try:
-    import cdsapi
+    import boto3
+    from botocore import UNSIGNED
+    from botocore.config import Config
+    from botocore.exceptions import ClientError
 except ImportError as e:
-    print(f"FATAL: Missing required library: {e.name}. Please install it using 'pip install {e.name}'.")
+    print(f"FATAL: Missing required library: {e.name}. Please install it using 'pip install boto3'.")
     sys.exit(1)
+
+try:
+    from tqdm import tqdm
+    from rich.console import Console
+    from rich.table import Table
+    HAS_UI_LIBS = True
+except ImportError:
+    HAS_UI_LIBS = False
 
 # --- Local Imports ---
 try:
     from gridflow.utils.logging_utils import setup_logging
 except ImportError:
-    print("FATAL: gridflow/utils/logging_utils.py not found. Please ensure it is in the correct directory.")
-    sys.exit(1)
+    # Fallback if module is run standalone
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+    def setup_logging(*args, **kwargs): pass
 
-# --- Global Stop Event for Graceful Shutdown ---
+# --- Constants ---
+AWS_BUCKET_NAME = 'nsf-ncar-era5'
+AWS_REGION = 'us-west-2'
+
+# --- Variable Mapping ---
+# Maps User Short Codes -> AWS S3 Folder & File Codes
+
+VARIABLE_MAP = {
+    # ==============================
+    # 1. TEMPERATURE & HEAT
+    # ==============================
+    "t2m": {"folder": "e5.oper.an.sfc", "code": "128_167_2t", "desc": "2m Air Temperature"},
+    "2m_temperature": {"folder": "e5.oper.an.sfc", "code": "128_167_2t", "desc": "2m Air Temperature"},
+    "d2m": {"folder": "e5.oper.an.sfc", "code": "128_168_2d", "desc": "2m Dewpoint Temperature"},
+    "skt": {"folder": "e5.oper.an.sfc", "code": "128_235_skt", "desc": "Skin Temperature"},
+    "sst": {"folder": "e5.oper.an.sfc", "code": "128_034_sstk", "desc": "Sea Surface Temperature"},
+    
+    # Soil & Ice Temps
+    "stl1": {"folder": "e5.oper.an.sfc", "code": "128_139_stl1", "desc": "Soil Temperature Level 1"},
+    "stl2": {"folder": "e5.oper.an.sfc", "code": "128_170_stl2", "desc": "Soil Temperature Level 2"},
+    "stl3": {"folder": "e5.oper.an.sfc", "code": "128_183_stl3", "desc": "Soil Temperature Level 3"},
+    "stl4": {"folder": "e5.oper.an.sfc", "code": "128_236_stl4", "desc": "Soil Temperature Level 4"},
+    "istl1": {"folder": "e5.oper.an.sfc", "code": "128_035_istl1", "desc": "Ice Temperature Layer 1"},
+    "istl2": {"folder": "e5.oper.an.sfc", "code": "128_036_istl2", "desc": "Ice Temperature Layer 2"},
+    "istl3": {"folder": "e5.oper.an.sfc", "code": "128_037_istl3", "desc": "Ice Temperature Layer 3"},
+    "istl4": {"folder": "e5.oper.an.sfc", "code": "128_038_istl4", "desc": "Ice Temperature Layer 4"},
+    "tsn": {"folder": "e5.oper.an.sfc", "code": "128_238_tsn", "desc": "Temperature of Snow Layer"},
+
+    # ==============================
+    # 2. PRECIPITATION & WATER
+    # ==============================
+    # Composite: Total Precip (Convective + Large Scale)
+    "precip": [
+        {"folder": "e5.oper.fc.sfc.accumu", "code": "128_143_cp", "desc": "Convective Precipitation (1/2)"},
+        {"folder": "e5.oper.fc.sfc.accumu", "code": "128_142_lsp", "desc": "Large Scale Precipitation (2/2)"}
+    ],
+    "total_precipitation": [
+        {"folder": "e5.oper.fc.sfc.accumu", "code": "128_143_cp", "desc": "Convective Precipitation (1/2)"},
+        {"folder": "e5.oper.fc.sfc.accumu", "code": "128_142_lsp", "desc": "Large Scale Precipitation (2/2)"}
+    ],
+    
+    "cp": {"folder": "e5.oper.fc.sfc.accumu", "code": "128_143_cp", "desc": "Convective Precipitation"},
+    "lsp": {"folder": "e5.oper.fc.sfc.accumu", "code": "128_142_lsp", "desc": "Large Scale Precipitation"},
+    "csf": {"folder": "e5.oper.fc.sfc.accumu", "code": "128_239_csf", "desc": "Convective Snowfall"},
+    "lsf": {"folder": "e5.oper.fc.sfc.accumu", "code": "128_240_lsf", "desc": "Large Scale Snowfall"},
+    "sf": {"folder": "e5.oper.fc.sfc.accumu", "code": "128_144_sf", "desc": "Snowfall"},
+    
+    # Water Vapor & Clouds
+    "tcw": {"folder": "e5.oper.an.sfc", "code": "128_136_tcw", "desc": "Total Column Water"},
+    "tcwv": {"folder": "e5.oper.an.sfc", "code": "128_137_tcwv", "desc": "Total Column Water Vapour"},
+    "tclw": {"folder": "e5.oper.an.sfc", "code": "128_078_tclw", "desc": "Total Column Cloud Liquid Water"},
+    "tciw": {"folder": "e5.oper.an.sfc", "code": "128_079_tciw", "desc": "Total Column Cloud Ice Water"},
+    "tcrw": {"folder": "e5.oper.an.sfc", "code": "228_089_tcrw", "desc": "Total Column Rain Water"},
+    "tcsw": {"folder": "e5.oper.an.sfc", "code": "228_090_tcsw", "desc": "Total Column Snow Water"},
+    "tcc": {"folder": "e5.oper.an.sfc", "code": "128_164_tcc", "desc": "Total Cloud Cover"},
+    "lcc": {"folder": "e5.oper.an.sfc", "code": "128_186_lcc", "desc": "Low Cloud Cover"},
+    "mcc": {"folder": "e5.oper.an.sfc", "code": "128_187_mcc", "desc": "Medium Cloud Cover"},
+    "hcc": {"folder": "e5.oper.an.sfc", "code": "128_188_hcc", "desc": "High Cloud Cover"},
+
+    # Evaporation & Runoff
+    "e": {"folder": "e5.oper.fc.sfc.accumu", "code": "128_182_e", "desc": "Evaporation"},
+    "pev": {"folder": "e5.oper.fc.sfc.accumu", "code": "228_251_pev", "desc": "Potential Evaporation"},
+    "es": {"folder": "e5.oper.fc.sfc.accumu", "code": "128_044_es", "desc": "Snow Evaporation"},
+    "smlt": {"folder": "e5.oper.fc.sfc.accumu", "code": "128_045_smlt", "desc": "Snowmelt"},
+    "ro": {"folder": "e5.oper.fc.sfc.accumu", "code": "128_205_ro", "desc": "Runoff"},
+    "sro": {"folder": "e5.oper.fc.sfc.accumu", "code": "128_008_sro", "desc": "Surface Runoff"},
+    "ssro": {"folder": "e5.oper.fc.sfc.accumu", "code": "128_009_ssro", "desc": "Sub-surface Runoff"},
+
+    # Soil Water
+    "swvl1": {"folder": "e5.oper.an.sfc", "code": "128_039_swvl1", "desc": "Volumetric Soil Water Layer 1"},
+    "swvl2": {"folder": "e5.oper.an.sfc", "code": "128_040_swvl2", "desc": "Volumetric Soil Water Layer 2"},
+    "swvl3": {"folder": "e5.oper.an.sfc", "code": "128_041_swvl3", "desc": "Volumetric Soil Water Layer 3"},
+    "swvl4": {"folder": "e5.oper.an.sfc", "code": "128_042_swvl4", "desc": "Volumetric Soil Water Layer 4"},
+
+    # ==============================
+    # 3. WIND & PRESSURE
+    # ==============================
+    "u10": {"folder": "e5.oper.an.sfc", "code": "128_165_10u", "desc": "10m U-Component of Wind"},
+    "v10": {"folder": "e5.oper.an.sfc", "code": "128_166_10v", "desc": "10m V-Component of Wind"},
+    "100u": {"folder": "e5.oper.an.sfc", "code": "228_246_100u", "desc": "100m U-Component of Wind"},
+    "100v": {"folder": "e5.oper.an.sfc", "code": "228_247_100v", "desc": "100m V-Component of Wind"},
+    "sp": {"folder": "e5.oper.an.sfc", "code": "128_134_sp", "desc": "Surface Pressure"},
+    "msl": {"folder": "e5.oper.an.sfc", "code": "128_151_msl", "desc": "Mean Sea Level Pressure"},
+    
+    # Stress (Instantaneous/Accumulated)
+    "iews": {"folder": "e5.oper.an.sfc", "code": "128_229_iews", "desc": "Instantaneous Eastward Wind Stress"},
+    "inss": {"folder": "e5.oper.an.sfc", "code": "128_230_inss", "desc": "Instantaneous Northward Wind Stress"},
+    "ewss": {"folder": "e5.oper.fc.sfc.accumu", "code": "128_180_ewss", "desc": "Eastward Turbulent Surface Stress"},
+    "nsss": {"folder": "e5.oper.fc.sfc.accumu", "code": "128_181_nsss", "desc": "Northward Turbulent Surface Stress"},
+
+    # ==============================
+    # 4. RADIATION & FLUXES
+    # ==============================
+    # Solar (Shortwave)
+    "ssrd": {"folder": "e5.oper.fc.sfc.accumu", "code": "128_169_ssrd", "desc": "Surface Solar Radiation Downwards"},
+    "ssrdc": {"folder": "e5.oper.fc.sfc.accumu", "code": "228_129_ssrdc", "desc": "Surface Solar Radiation Downwards, Clear Sky"},
+    "ssr": {"folder": "e5.oper.fc.sfc.accumu", "code": "128_176_ssr", "desc": "Surface Net Solar Radiation"},
+    "ssrc": {"folder": "e5.oper.fc.sfc.accumu", "code": "128_210_ssrc", "desc": "Surface Net Solar Radiation, Clear Sky"},
+    "tsr": {"folder": "e5.oper.fc.sfc.accumu", "code": "128_178_tsr", "desc": "Top Net Solar Radiation"},
+    "tisr": {"folder": "e5.oper.fc.sfc.accumu", "code": "128_212_tisr", "desc": "TOA Incident Solar Radiation"},
+    "fdir": {"folder": "e5.oper.fc.sfc.accumu", "code": "228_021_fdir", "desc": "Total Sky Direct Solar Radiation"},
+    "cdir": {"folder": "e5.oper.fc.sfc.accumu", "code": "228_022_cdir", "desc": "Clear-sky Direct Solar Radiation"},
+    "fal": {"folder": "e5.oper.an.sfc", "code": "128_243_fal", "desc": "Forecast Albedo"},
+
+    # Thermal (Longwave)
+    "strd": {"folder": "e5.oper.fc.sfc.accumu", "code": "128_175_strd", "desc": "Surface Thermal Radiation Downwards"},
+    "strdc": {"folder": "e5.oper.fc.sfc.accumu", "code": "228_130_strdc", "desc": "Surface Thermal Radiation Downwards, Clear Sky"},
+    "str": {"folder": "e5.oper.fc.sfc.accumu", "code": "128_177_str", "desc": "Surface Net Thermal Radiation"},
+    "strc": {"folder": "e5.oper.fc.sfc.accumu", "code": "128_211_strc", "desc": "Surface Net Thermal Radiation, Clear Sky"},
+    "ttr": {"folder": "e5.oper.fc.sfc.accumu", "code": "128_179_ttr", "desc": "Top Net Thermal Radiation"},
+
+    # Heat Fluxes
+    "sshf": {"folder": "e5.oper.fc.sfc.accumu", "code": "128_146_sshf", "desc": "Surface Sensible Heat Flux"},
+    "slhf": {"folder": "e5.oper.fc.sfc.accumu", "code": "128_147_slhf", "desc": "Surface Latent Heat Flux"},
+    "ishf": {"folder": "e5.oper.an.sfc", "code": "128_231_ishf", "desc": "Instantaneous Surface Sensible Heat Flux"},
+    "ie": {"folder": "e5.oper.an.sfc", "code": "128_232_ie", "desc": "Instantaneous Moisture Flux (Evaporation)"},
+
+    # ==============================
+    # 5. OTHER SURFACE / VEGETATION
+    # ==============================
+    "lsm": {"folder": "e5.oper.an.sfc", "code": "128_172_lsm", "desc": "Land-Sea Mask"},
+    "sd": {"folder": "e5.oper.an.sfc", "code": "128_141_sd", "desc": "Snow Depth"},
+    "asn": {"folder": "e5.oper.an.sfc", "code": "128_032_asn", "desc": "Snow Albedo"},
+    "rsn": {"folder": "e5.oper.an.sfc", "code": "128_033_rsn", "desc": "Snow Density"},
+    "ci": {"folder": "e5.oper.an.sfc", "code": "128_031_ci", "desc": "Sea Ice Cover"},
+    "lailv": {"folder": "e5.oper.an.sfc", "code": "128_066_lailv", "desc": "Leaf Area Index, Low Vegetation"},
+    "laihv": {"folder": "e5.oper.an.sfc", "code": "128_067_laihv", "desc": "Leaf Area Index, High Vegetation"},
+    "cape": {"folder": "e5.oper.an.sfc", "code": "128_059_cape", "desc": "Convective Available Potential Energy"},
+    "blh": {"folder": "e5.oper.an.sfc", "code": "128_159_blh", "desc": "Boundary Layer Height"},
+    "tco3": {"folder": "e5.oper.an.sfc", "code": "128_206_tco3", "desc": "Total Column Ozone"},
+    "fsr": {"folder": "e5.oper.an.sfc", "code": "128_244_fsr", "desc": "Forecast Surface Roughness"},
+}
+
+ERA5_VARIABLES = list(VARIABLE_MAP.keys())
+
+# Predefined Areas of Interest (N, S, E, W)
+AOI_BOUNDS = {
+    "corn_belt": [49.5, 35.8, -80.4, -104.5], 
+    "iowa": [43.5, 40.3, -90.1, -96.7],
+    "conus": [49.38, 24.52, -66.93, -124.78]
+}
+
+# --- Global Stop Event ---
 stop_event = threading.Event()
 
 def signal_handler(sig, frame):
-    """Handles SIGINT (Ctrl+C) to gracefully shut down the application."""
-    logging.warning("Stop signal received! Gracefully shutting down...")
+    """Handles SIGINT (Ctrl+C)."""
+    logging.info("Stop signal received! Gracefully shutting down...")
     stop_event.set()
-    logging.info("Please wait for ongoing tasks to complete.")
 
-# --- Area of Interest Definitions [North, West, South, East] ---
-AOI_BOUNDS = {
-    "global": [90, -180, -90, 180],
-    "north_america": [84, -168, 5, -52],
-    "conus": [50, -125, 24, -66],
-    "corn_belt": [49.5, -104.5, 35.8, -80.4],
-}
+class FileManager:
+    """Handles file and directory management for ERA5 data."""
+    def __init__(self, download_dir: str, metadata_dir: str, metadata_prefix: str = ""):
+        self.download_dir = Path(download_dir)
+        self.metadata_dir = Path(metadata_dir)
+        self.metadata_prefix = metadata_prefix
+        try:
+            self.download_dir.mkdir(parents=True, exist_ok=True)
+            self.metadata_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            logging.error(f"Failed to create directories: {e}")
+            sys.exit(1)
 
-# --- ERA5 Variables List ---
-ERA5_VARIABLES = [
-    "2m_dewpoint_temperature", "2m_temperature", "skin_temperature", "soil_temperature_level_1",
-    "soil_temperature_level_2", "soil_temperature_level_3", "soil_temperature_level_4",
-    "lake_bottom_temperature", "lake_ice_depth", "lake_ice_temperature", "lake_mix_layer_depth",
-    "lake_mix_layer_temperature", "lake_shape_factor", "lake_total_layer_temperature", "snow_albedo",
-    "snow_cover", "snow_density", "snow_depth", "snow_depth_water_equivalent", "snowfall",
-    "snowmelt", "temperature_of_snow_layer", "skin_reservoir_content", "volumetric_soil_water_layer_1",
-    "volumetric_soil_water_layer_2", "volumetric_soil_water_layer_3", "volumetric_soil_water_layer_4",
-    "forecast_albedo", "surface_latent_heat_flux", "surface_net_solar_radiation",
-    "surface_net_thermal_radiation", "surface_sensible_heat_flux", "surface_solar_radiation_downwards",
-    "surface_thermal_radiation_downwards", "evaporation_from_bare_soil",
-    "evaporation_from_open_water_surfaces_excluding_oceans", "evaporation_from_the_top_of_canopy",
-    "evaporation_from_vegetation_transpiration", "potential_evaporation", "runoff",
-    "snow_evaporation", "sub_surface_runoff", "surface_runoff", "total_evaporation",
-    "10m_u_component_of_wind", "10m_v_component_of_wind", "surface_pressure", "total_precipitation",
-    "leaf_area_index_high_vegetation", "leaf_area_index_low_vegetation", "high_vegetation_cover",
-    "glacier_mask", "lake_cover", "low_vegetation_cover", "lake_total_depth", "geopotential",
-    "land_sea_mask", "soil_type", "type_of_high_vegetation", "type_of_low_vegetation"
-]
+    def get_output_path(self, file_info: Dict) -> Path:
+        """Constructs output path."""
+        filename = file_info.get('filename')
+        return self.download_dir / filename
 
+    def save_metadata(self, files: List[Dict], filename: str) -> None:
+        metadata_path = self.metadata_dir / f"{self.metadata_prefix}{filename}"
+        serializable_files = []
+        for f in files:
+            item = f.copy()
+            if 'output_path' in item and isinstance(item['output_path'], Path):
+                item['output_path'] = str(item['output_path'])
+            serializable_files.append(item)
+            
+        try:
+            with open(metadata_path, 'w', encoding='utf-8') as f:
+                json.dump(serializable_files, f, indent=2)
+            logging.debug(f"Saved metadata to {metadata_path}")
+        except IOError as e:
+            logging.error(f"Failed to save metadata to {metadata_path}: {e}")
+
+class QueryHandler:
+    """Handles generating and validating AWS S3 keys for ERA5."""
+    def __init__(self, stop_event: threading.Event):
+        self._stop_event = stop_event
+        self.s3 = boto3.client('s3', region_name=AWS_REGION, config=Config(signature_version=UNSIGNED))
+
+    def generate_potential_files(self, variables: List[str], start_date: str, end_date: str) -> List[Dict]:
+        """Generates list of S3 keys based on date range and variable mapping."""
+        start = datetime.strptime(start_date, "%Y-%m-%d")
+        end = datetime.strptime(end_date, "%Y-%m-%d")
+        
+        potential_files = []
+        
+        for var_name in variables:
+            # Splits "t2m (2m Temp)" -> "t2m"
+            var_clean = var_name.split('(')[0].strip().lower()
+            
+            if var_clean not in VARIABLE_MAP:
+                logging.warning(f"Variable '{var_clean}' not found in mapping. Use --list-variables to see valid options. Skipping.")
+                continue
+            
+            # Handle both single dict and list of dicts (for composite variables like precip)
+            entry = VARIABLE_MAP[var_clean]
+            metas = entry if isinstance(entry, list) else [entry]
+            
+            for meta in metas:
+                current = start.replace(day=1)
+                while current <= end:
+                    year_month = current.strftime("%Y%m")
+                    prefix = f"{meta['folder']}/{year_month}/{meta['folder']}.{meta['code']}."
+                    
+                    potential_files.append({
+                        'variable_user': var_clean,
+                        'description': meta.get('desc', ''),
+                        'year': current.year,
+                        'month': current.month,
+                        'prefix': prefix,
+                        's3_bucket': AWS_BUCKET_NAME
+                    })
+                    current += relativedelta(months=1)
+                
+        return potential_files
+
+    def validate_files_on_s3(self, potential_files: List[Dict], is_gui_mode: bool = False) -> List[Dict]:
+        """Checks S3 to find the exact filename (timestamps differ) and verifies existence."""
+        valid_files = []
+        use_rich = HAS_UI_LIBS and not is_gui_mode
+        status_context = None
+
+        if use_rich:
+            console = Console()
+            status_context = console.status(f"[bold green]Querying AWS S3 for {len(potential_files)} monthly files...", spinner="dots")
+            status_context.start()
+        else:
+            logging.info(f"Querying AWS S3 for {len(potential_files)} monthly files...")
+
+        try:
+            with ThreadPoolExecutor(max_workers=10, thread_name_prefix="S3Checker") as executor:
+                future_to_task = {executor.submit(self._find_s3_key, p): p for p in potential_files}
+                
+                for future in as_completed(future_to_task):
+                    if self._stop_event.is_set(): break
+                    result = future.result()
+                    if result:
+                        valid_files.append(result)
+        except Exception as e:
+            logging.error(f"Error during S3 query: {e}")
+        finally:
+            if status_context: status_context.stop()
+        
+        if use_rich:
+            Console().print(f"[bold blue]Query complete![/] Found {len(valid_files)} available files.")
+        else:
+            logging.info(f"Query complete! Found {len(valid_files)} available files.")
+            
+        return valid_files
+
+    def _find_s3_key(self, task: Dict) -> Optional[Dict]:
+        if self._stop_event.is_set(): return None
+        try:
+            # List objects with prefix to find specific file (start/end hours in filename vary)
+            response = self.s3.list_objects_v2(
+                Bucket=task['s3_bucket'], 
+                Prefix=task['prefix'], 
+                MaxKeys=1
+            )
+            
+            if 'Contents' in response:
+                s3_key = response['Contents'][0]['Key']
+                file_size = response['Contents'][0]['Size']
+                
+                return {
+                    'title': s3_key.split('/')[-1],
+                    'filename': s3_key.split('/')[-1],
+                    's3_key': s3_key,
+                    's3_bucket': task['s3_bucket'],
+                    'size_bytes': file_size,
+                    'variable': task['variable_user'],
+                    'year': task['year'],
+                    'month': task['month']
+                }
+            return None
+        except ClientError:
+            return None
 
 class Downloader:
-    """Manages the file download process for ERA5 data."""
-    def __init__(self, settings: Dict[str, Any], stop_event: threading.Event):
-        self.settings = settings
+    """Manages the download process from S3."""
+    def __init__(self, file_manager: FileManager, stop_event: threading.Event, **settings):
+        self.file_manager = file_manager
         self._stop_event = stop_event
-        self.cds_client = cdsapi.Client(
-            url="https://cds.climate.copernicus.eu/api/v2",
-            key=self.settings['api_key']
-        )
+        self.settings = settings
+        self.successful_downloads = 0
         self.executor = None
+        self.s3 = boto3.client('s3', region_name=AWS_REGION, config=Config(signature_version=UNSIGNED))
 
     def shutdown(self):
-        """Shuts down the thread pool gracefully."""
         if self.executor:
             self.executor.shutdown(wait=True, cancel_futures=True)
         logging.info("Downloader has been shut down.")
 
-    def download_month(self, year: int, month: int, variable: str, area: List[float]) -> bool:
-        """Downloads data for a single month and variable."""
-        if self._stop_event.is_set():
-            return False
-
-        output_dir = Path(self.settings['output_dir'])
-        output_dir.mkdir(parents=True, exist_ok=True)
+    def download_file(self, file_info: Dict) -> Tuple[Optional[str], Optional[Dict]]:
+        if self._stop_event.is_set(): return None, file_info
         
-        aoi_name = self.settings.get('aoi', 'custom')
-        output_file = output_dir / f"era5_land_{year}_{month:02d}_{aoi_name}_{variable}.nc"
-
-        if output_file.exists():
-            logging.info(f"Skipping {output_file.name} - already exists.")
-            return True
-
-        request = {
-            "variable": [variable],
-            "year": str(year),
-            "month": f"{month:02d}",
-            "day": [f"{d:02d}" for d in range(1, 32)],
-            "time": [f"{h:02d}:00" for h in range(24)],
-            "format": "netcdf",
-            "area": area
-        }
+        output_path = self.file_manager.get_output_path(file_info)
+        file_info['output_path'] = output_path 
+        
+        if output_path.exists():
+            if output_path.stat().st_size == file_info['size_bytes']:
+                logging.debug(f"Skipping {output_path.name} - already exists.")
+                return str(output_path), None
         
         try:
-            logging.info(f"Starting download for {year}-{month:02d} ({variable}) to {output_file.name}")
-            self.cds_client.retrieve("reanalysis-era5-land", request, output_file)
-            logging.info(f"Finished download for {year}-{month:02d} ({variable})")
-            return True
+            logging.debug(f"Downloading {file_info['s3_key']}")
+            self.s3.download_file(file_info['s3_bucket'], file_info['s3_key'], str(output_path))
+            return str(output_path), None
         except Exception as e:
-            if self._stop_event.is_set():
-                logging.warning(f"Download for {year}-{month:02d} ({variable}) interrupted by user.")
-            else:
-                logging.error(f"Failed to download {year}-{month:02d} ({variable}): {e}", exc_info=True)
-            if output_file.exists():
-                output_file.unlink() # Clean up failed download
-            return False
+            if self._stop_event.is_set(): return None, file_info
+            logging.warning(f"Failed to download {file_info['title']}: {e}")
+            if output_path.exists(): output_path.unlink()
+            return None, {**file_info, "error": str(e)}
 
-    def download_all(self, tasks: List[Tuple[int, int, str]], area: List[float]) -> Tuple[int, int]:
-        """Manages the download of a list of month/variable tasks."""
-        successful_downloads = 0
-        if not tasks:
-            return 0, 0
+    def download_all(self, files_to_download: List[Dict]) -> Tuple[List[str], List[Dict]]:
+        downloaded, failed = [], []
+        if not files_to_download: return [], []
+
+        total_files = len(files_to_download)
+        self.executor = ThreadPoolExecutor(max_workers=self.settings.get('workers', 4), thread_name_prefix='Downloader')
         
-        self.executor = ThreadPoolExecutor(max_workers=self.settings['workers'], thread_name_prefix='Downloader')
-        future_to_task = {
-            self.executor.submit(self.download_month, year, month, var, area): (year, month, var)
-            for year, month, var in tasks
-        }
+        future_to_file = {self.executor.submit(self.download_file, f): f for f in files_to_download}
+
+        is_gui_mode = self.settings.get('is_gui_mode', False)
+        use_tqdm = HAS_UI_LIBS and not is_gui_mode
+        futures_iter = as_completed(future_to_file)
         
-        total_files = len(tasks)
+        if use_tqdm:
+            futures_iter = tqdm(futures_iter, total=total_files, unit="file", desc="Downloading", ncols=90, bar_format='  {l_bar}{bar}{r_bar}')
+
         try:
-            for i, future in enumerate(as_completed(future_to_task)):
-                logging.info(f"Progress: {i + 1}/{total_files} files processed.")
+            for i, future in enumerate(futures_iter):
                 if self._stop_event.is_set():
+                    for f in future_to_file: f.cancel()
                     break
-                if future.result():
-                    successful_downloads += 1
-                if self._stop_event.is_set():
-                    break
+
+                if is_gui_mode:
+                    logging.info(f"Progress: {i + 1}/{total_files} files processed.")
+
+                original_info = future_to_file[future]
+                try:
+                    path, failed_info = future.result()
+                    if path:
+                        downloaded.append(path)
+                        if use_tqdm:
+                            short_name = (Path(path).name[:40] + '..') if len(Path(path).name) > 40 else Path(path).name
+                            tqdm.write(f"  ✔ Downloaded {short_name}")
+                        elif is_gui_mode:
+                            logging.info(f"Downloaded {Path(path).name}")
+                    if failed_info:
+                        failed.append(failed_info)
+                        if use_tqdm:
+                            tqdm.write(f"  ✖ Failed: {original_info['title']}")
+                        elif is_gui_mode:
+                            logging.info(f"Failed: {original_info['title']}")
+                except Exception as e:
+                    failed.append(original_info)
+                    logging.error(f"Error processing {original_info['title']}: {e}")
+        except Exception as e:
+            print(f"\nCRITICAL ERROR in download loop: {e}", file=sys.stderr)
+            raise e
         finally:
             self.shutdown()
+
+        self.successful_downloads = len(downloaded)
+        return downloaded, failed
+
+def print_variables_table():
+    """Prints a table of available variables."""
+    if HAS_UI_LIBS:
+        console = Console()
+        table = Table(title="Available ERA5 Variables (AWS S3)", show_header=True, header_style="bold magenta")
+        table.add_column("Short Code", style="cyan", width=15)
+        table.add_column("Description", style="white")
+        table.add_column("AWS File Code", style="dim")
+
+        for key, value in VARIABLE_MAP.items():
+            if isinstance(value, list):
+                # Handle composite variables like precip
+                desc = " & ".join([v.get('desc', '') for v in value])
+                codes = " + ".join([v.get('code', '') for v in value])
+                table.add_row(key, f"[Composite] {desc}", codes)
+            else:
+                table.add_row(key, value.get('desc', 'N/A'), value.get('code', 'N/A'))
         
-        return successful_downloads, total_files
+        console.print(table)
+    else:
+        print(f"{'Short Code':<20} | {'Description':<40} | {'AWS Code'}")
+        print("-" * 80)
+        for key, value in VARIABLE_MAP.items():
+            if isinstance(value, list):
+                desc = "Composite (e.g. " + value[0].get('desc', '') + ")"
+                print(f"{key:<20} | {desc:<40} | Multiple")
+            else:
+                print(f"{key:<20} | {value.get('desc', ''):<40} | {value.get('code', '')}")
 
-def generate_tasks(start_date_str: str, end_date_str: str, variables: List[str]) -> List[Tuple[int, int, str]]:
-    """Generates a list of (year, month, variable) tasks."""
-    start = datetime.strptime(start_date_str, "%Y-%m-%d")
-    end = datetime.strptime(end_date_str, "%Y-%m-%d")
-    
-    tasks = []
-    for var in variables:
-        current = start
-        while current <= end:
-            tasks.append((current.year, current.month, var))
-            # Move to the next month
-            next_month = current.month % 12 + 1
-            next_year = current.year + (current.month // 12)
-            current = current.replace(year=next_year, month=next_month, day=1)
-    return tasks
-
-def run_download_session(settings: Dict[str, Any], stop_event: threading.Event):
-    """Sets up and executes an ERA5 download session."""
+def load_config(config_path: str) -> Dict:
     try:
-        # Determine the area for the download
-        if settings.get('bounds'):
-            area = settings['bounds']
-            logging.info(f"Using custom bounding box: {area}")
-        else:
-            area = AOI_BOUNDS[settings['aoi']]
-            logging.info(f"Using predefined AOI '{settings['aoi']}': {area}")
+        with open(config_path, 'r', encoding='utf-8') as f: return json.load(f)
+    except Exception as e:
+        logging.error(f"Failed to load config file: {e}")
+        return {}
 
-        variables = [v.strip() for v in settings['variables'].split(',')]
-        tasks = generate_tasks(settings['start_date'], settings['end_date'], variables)
-        
-        if not tasks:
-            logging.info("No tasks to process for the given date range and variables.")
+def create_download_session(settings: Dict[str, Any], stop_event: threading.Event) -> None:
+    is_gui_mode = settings.get('is_gui_mode', False)
+    try:
+        if settings.get('retry_failed_path'):
+            files_to_process = load_config(settings['retry_failed_path'])
+        else:
+            raw_vars = settings.get('variables', '')
+            variables = [v.strip() for v in raw_vars.split(',') if v.strip()] if isinstance(raw_vars, str) else raw_vars
+
+            if not variables and not settings.get('demo'):
+                logging.error("No variables specified. Use -var to specify variables or --list-variables to see options.")
+                if not is_gui_mode: sys.exit(1)
+                return
+
+            query_handler = QueryHandler(stop_event=stop_event)
+            potential_files = query_handler.generate_potential_files(variables, settings['start_date'], settings['end_date'])
+            
+            if not potential_files:
+                logging.error("No valid variables found in mapping. Use --list-variables to see valid codes.")
+                if not is_gui_mode: sys.exit(1)
+                return
+
+            files_to_process = query_handler.validate_files_on_s3(potential_files, is_gui_mode=is_gui_mode)
+
+        if not files_to_process:
+            logging.info("No available files found on S3 for criteria.")
+            if not is_gui_mode: sys.exit(0)
             return
 
-        logging.info(f"Generated {len(tasks)} download tasks.")
-        
-        downloader = Downloader(settings, stop_event)
-        successful, total = downloader.download_all(tasks, area)
+        file_manager = FileManager(settings['output_dir'], settings['metadata_dir'], "gridflow_era5_")
+        file_manager.save_metadata(files_to_process, "query_results.json")
 
-        if stop_event.is_set():
-            logging.warning("Process was stopped before completion.")
+        if settings.get('dry_run'):
+            logging.info(f"Dry run: Would attempt to download {len(files_to_process)} files.")
+            return
+
+        settings.pop('stop_event', None)
+        settings.pop('stop_flag', None)
+
+        downloader = Downloader(file_manager, stop_event, **settings)
+        downloaded, failed = downloader.download_all(files_to_process)
+
+        if stop_event.is_set(): logging.warning("Process was stopped before completion.")
+        if failed:
+            file_manager.save_metadata(failed, "failed_downloads.json")
+            logging.warning(f"{len(failed)} downloads failed. Check 'failed_downloads.json' for details.")
         
-        logging.info(f"Completed: {successful}/{total} files downloaded successfully.")
+        logging.info(f"Completed: {downloader.successful_downloads}/{len(files_to_process)} files downloaded successfully.")
 
     except Exception as e:
-        logging.critical(f"A critical error occurred during the session: {e}", exc_info=True)
+        logging.critical(f"A critical error occurred: {e}", exc_info=True)
         stop_event.set()
 
 def add_arguments(parser):
-    """Add ERA5 downloader arguments to the provided parser."""
-    io_group = parser.add_argument_group('Input and Output')
-    dl_group = parser.add_argument_group('Download Parameters')
-    settings_group = parser.add_argument_group('Processing Settings')
+    query_group = parser.add_argument_group('Query Parameters')
+    settings_group = parser.add_argument_group('Download Settings')
 
-    io_group.add_argument("--output_dir", help="Directory to save downloaded files.", default="./downloads_era5")
+    query_group.add_argument("-var", "--variables", help="Comma-separated variables (e.g., t2m, precip, u10).")
+    query_group.add_argument("-sd", "--start-date", help="Start date (YYYY-MM-DD).")
+    query_group.add_argument("-ed", "--end-date", help="End date (YYYY-MM-DD).")
+    query_group.add_argument("-lv", "--list-variables", action="store_true", help="List all available variables and their descriptions.")
     
-    dl_group.add_argument("--api_key", help="CDS API key (UID:KEY).", required=True)
-    dl_group.add_argument("--start_date", default="2020-01-01", help="Start date (YYYY-MM-DD).")
-    dl_group.add_argument("--end_date", default="2020-01-31", help="End date (YYYY-MM-DD).")
-    dl_group.add_argument("--variables", default="2m_temperature,total_precipitation", help="Comma-separated list of variables.")
-    
-    # Mutually exclusive group for AOI or custom bounds
-    area_group = dl_group.add_mutually_exclusive_group()
-    area_group.add_argument("--aoi", default="corn_belt", choices=list(AOI_BOUNDS.keys()), help="Predefined Area of Interest.")
-    area_group.add_argument("--bounds", nargs=4, type=float, metavar=('N', 'W', 'S', 'E'), help="Custom bounding box: North West South East.")
-    
-    settings_group.add_argument("--log-dir", default="./gridflow_logs", help="Directory to save log files.")
-    settings_group.add_argument("--log-level", default="verbose", choices=["minimal", "verbose", "debug"], help="Set logging verbosity.")
-    settings_group.add_argument("--workers", type=int, default=4, help="Number of parallel workers.")
-    settings_group.add_argument("--demo", action="store_true", help="Run with demo defaults.")
+    settings_group.add_argument("-o", "--output-dir", default="./downloads_era5", help="Output directory.")
+    settings_group.add_argument("-md", "--metadata-dir", default="./metadata_era5", help="Metadata directory.")
+    settings_group.add_argument("-ld", "--log-dir", default="./gridflow_logs", help="Log directory.")
+    settings_group.add_argument("-ll", "--log-level", default="minimal", choices=["minimal", "verbose", "debug"], help="Log verbosity.")
+    settings_group.add_argument("-w", "--workers", type=int, default=4, help="Number of parallel workers.")
+    settings_group.add_argument("--dry-run", action="store_true", help="Find files but do not download.")
+    settings_group.add_argument("--demo", action="store_true", help="Run with demo settings.")
+    settings_group.add_argument("-c", "--config", help="Path to JSON config file.")
+    settings_group.add_argument("--retry-failed", help="Path to failed_downloads.json to retry.")
 
 def main(args=None):
-    """Main entry point for the ERA5 Downloader CLI."""
     if args is None:
         import argparse
-        parser = argparse.ArgumentParser(description="ERA5-Land Data Downloader", formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+        parser = argparse.ArgumentParser(description="ERA5 (AWS S3) Downloader", formatter_class=argparse.ArgumentDefaultsHelpFormatter)
         add_arguments(parser)
         args = parser.parse_args()
-    
-    setup_logging(args.log_dir, args.log_level, prefix="era5_downloader")
-    signal.signal(signal.SIGINT, signal_handler)
-    
-    settings = vars(args)
-    if args.demo:
-        logging.info("Running in demo mode.")
-        settings['start_date'] = '2023-01-01'
-        settings['end_date'] = '2023-01-02'
-        settings['variables'] = '2m_temperature'
-        settings['aoi'] = 'corn_belt'
-        settings['bounds'] = None # Ensure bounds is not used in demo
-        if not settings.get('api_key'):
-            logging.error("API key is required for demo mode. Please provide with --api_key.")
-            sys.exit(1)
-        logging.info(f"Demo will download '{settings['variables']}' for {settings['start_date']} to {settings['end_date']}.")
-    
-    if not settings.get('api_key'):
-        logging.error("An API key is required. Please provide it with the --api_key argument.")
-        sys.exit(1)
 
-    run_download_session(settings, stop_event)
+    # Handle List Variables immediately
+    if getattr(args, 'list_variables', False):
+        print_variables_table()
+        sys.exit(0)
+
+    # FIX: Only set up logging if NOT in GUI mode
+    if not getattr(args, 'is_gui_mode', False):
+        setup_logging(args.log_dir, args.log_level, prefix="era5_downloader")
+        signal.signal(signal.SIGINT, signal_handler)
+
+    active_stop_event = getattr(args, 'stop_event', stop_event)
+
+    config = load_config(args.config) if args.config else {}
+    cli_args = {k: v for k, v in vars(args).items() if v is not None}
+    settings = {**config, **cli_args}
+
+    if settings.get('demo'):
+        settings.update({
+            'variables': ['t2m', 'precip'],
+            'start_date': '2021-01-01',
+            'end_date': '2021-03-01'
+        })
+        
+        demo_cmd = "gridflow era5 --variables t2m,precip --start-date 2021-01-01 --end-date 2021-03-01"
+
+        if HAS_UI_LIBS and not getattr(args, 'is_gui_mode', False):
+            console = Console()
+            console.print(f"[bold yellow]Running in demo mode (AWS S3 source).[/]")
+            console.print(f"Demo Command:\n  [dim]{demo_cmd}[/dim]\n")
+        else:
+            logging.info(f"Running in demo mode.\nDemo Command: {demo_cmd}")
+
+    else:
+        if not all([settings.get('variables'), settings.get('start_date'), settings.get('end_date')]):
+            logging.error("Required arguments missing: --variables, --start-date, --end-date")
+            if not getattr(args, 'is_gui_mode', False):
+                sys.exit(1)
+            return
+
+    create_download_session(settings, active_stop_event)
     
-    if stop_event.is_set():
+    if active_stop_event.is_set():
         logging.warning("Execution was interrupted.")
-        sys.exit(130)
-    
+        if not getattr(args, 'is_gui_mode', False):
+            sys.exit(130)
+
     logging.info("Process finished.")
 
 if __name__ == "__main__":

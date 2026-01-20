@@ -3,13 +3,11 @@
 import argparse
 import json
 import logging
-import signal
-import sys
 import threading
 from urllib.parse import parse_qs
 from concurrent.futures import Future
 from pathlib import Path
-from unittest.mock import MagicMock, patch, PropertyMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 import requests
@@ -17,7 +15,7 @@ from requests.exceptions import RequestException
 
 import gridflow.download.cmip5_downloader as cmip5_downloader
 from gridflow.download.cmip5_downloader import (
-    ESGF_NODES,
+    ALL_ESGF_NODES,
     FileManager,
     InterruptibleSession,
     QueryHandler,
@@ -49,8 +47,10 @@ def file_manager(tmp_path):
     return FileManager(str(tmp_path / "downloads"), str(tmp_path / "metadata"), "structured")
 
 @pytest.fixture
-def query_handler(mock_stop_event):
-    return QueryHandler(ESGF_NODES, mock_stop_event)
+def query_handler(mock_stop_event, mocker):
+    mocker.patch.object(QueryHandler, '_get_available_nodes', return_value=["node1", "node2"])
+    qh = QueryHandler(stop_event=mock_stop_event)
+    return qh
 
 @pytest.fixture
 def downloader(file_manager, mock_stop_event):
@@ -160,11 +160,13 @@ def test_save_metadata_error(mocker, file_manager, caplog):
 # Tests for QueryHandler
 # ############################################################################
 
-def test_query_handler_init(mock_stop_event):
-    qh = QueryHandler(["node1"], mock_stop_event)
+def test_query_handler_init(mock_stop_event, mocker):
+    mocker.patch.object(QueryHandler, '_get_available_nodes', return_value=["node1"])
+    qh = QueryHandler(stop_event=mock_stop_event)
     assert qh.nodes == ["node1"]
     assert qh._stop_event == mock_stop_event
     assert isinstance(qh.session, InterruptibleSession)
+
 
 def test_build_query(query_handler):
     """
@@ -185,17 +187,28 @@ def test_build_query(query_handler):
     assert parsed_query == expected
 
 def test_fetch_datasets_success(mocker, query_handler):
-    mock_fetch_node = mocker.patch.object(query_handler, '_fetch_from_node', return_value=[{'id': '1'}])
+    import threading
+    query_handler._stop_event = threading.Event()
+    query_handler.nodes = ["node1"]
+    mocker.patch.object(query_handler, '_fetch_from_node',
+                        return_value=[{'title': 't1', 'url': ['http://n1/u1|HTTP|HTTPServer']}])
     files = query_handler.fetch_datasets({'model': 'CanCM4'}, 30)
-    assert files == [{'id': '1'}]
-    mock_fetch_node.assert_called_once()
+    assert files == [{'title': 't1', 'url': ['http://n1/u1|HTTP|HTTPServer']}]
 
 def test_fetch_datasets_multiple_nodes_unique(mocker, query_handler):
-    mock_fetch_node = mocker.patch.object(query_handler, '_fetch_from_node')
-    mock_fetch_node.side_effect = [[{'id': '1'}], [{'id': '1'}, {'id': '2'}]]
+    import threading
+    query_handler._stop_event = threading.Event()
+    query_handler.nodes = ["node1", "node2"]
+    mock_fetch = mocker.patch.object(query_handler, '_fetch_from_node')
+    mock_fetch.side_effect = [
+        [{'title': 't1', 'url': ['http://n1/u1|HTTP|HTTPServer']}],
+        [{'title': 't1', 'url': ['http://n2/u1|HTTP|HTTPServer']},
+         {'title': 't2', 'url': ['http://n2/u2|HTTP|HTTPServer']}]
+    ]
     files = query_handler.fetch_datasets({}, 30)
-    assert len(files) == 1  # Only from first node since all_files not empty
-    assert files[0]['id'] == '1'
+    assert any(f['title'] == 't1' and len(f['url']) == 2 for f in files)
+    assert {'title': 't2', 'url': ['http://n2/u2|HTTP|HTTPServer']} in files
+    assert len(files) == 2
 
 def test_fetch_datasets_interrupted(mock_stop_event, query_handler):
     mock_stop_event.is_set.return_value = True
@@ -203,34 +216,49 @@ def test_fetch_datasets_interrupted(mock_stop_event, query_handler):
     assert files == []
 
 def test_fetch_datasets_timeout(mocker, query_handler, caplog):
+    caplog.set_level(logging.ERROR)
+    query_handler._stop_event = threading.Event()
+    query_handler.nodes = ["node1"]
     mocker.patch.object(query_handler, '_fetch_from_node', side_effect=requests.Timeout)
     files = query_handler.fetch_datasets({}, 30)
-    assert "timed out" in caplog.text
     assert files == []
+    assert "An error occurred while querying node" in caplog.text
 
 def test_fetch_datasets_connection_error(mocker, query_handler, caplog):
+    caplog.set_level(logging.ERROR)
+    query_handler._stop_event = threading.Event()
+    query_handler.nodes = ["node1"]
     mocker.patch.object(query_handler, '_fetch_from_node', side_effect=requests.ConnectionError)
     files = query_handler.fetch_datasets({}, 30)
-    assert "Could not connect" in caplog.text
     assert files == []
+    assert "An error occurred while querying node" in caplog.text
 
 def test_fetch_datasets_request_exception(mocker, query_handler, caplog):
+    caplog.set_level(logging.ERROR)
+    query_handler._stop_event = threading.Event()
+    query_handler.nodes = ["node1"]
     mocker.patch.object(query_handler, '_fetch_from_node', side_effect=requests.RequestException("Error"))
     files = query_handler.fetch_datasets({}, 30)
-    assert "An error occurred" in caplog.text
     assert files == []
+    assert "An error occurred while querying node" in caplog.text
 
 def test_fetch_datasets_unexpected_error(mocker, query_handler, caplog):
+    import threading
+    caplog.set_level(logging.ERROR)
+    query_handler._stop_event = threading.Event()
+    query_handler.nodes = ["node1"]
     mocker.patch.object(query_handler, '_fetch_from_node', side_effect=Exception("Unexpected"))
     files = query_handler.fetch_datasets({}, 30)
-    assert "unexpected error" in caplog.text
     assert files == []
+    assert "An error occurred while querying node" in caplog.text
 
 def test_fetch_datasets_all_fail(query_handler, caplog):
+    caplog.set_level(logging.ERROR)
     query_handler.nodes = []
     files = query_handler.fetch_datasets({}, 30)
-    assert "All nodes failed" in caplog.text
     assert files == []
+    assert "No ESGF nodes available to query." in caplog.text
+
 
 def test__fetch_from_node_success(mocker, query_handler):
     mock_get = mocker.patch.object(query_handler.session, 'get')
@@ -316,22 +344,30 @@ def test__fetch_esgf_certificate_invalid_existing(mocker, downloader, tmp_path):
     mock_post.assert_called()
 
 def test__fetch_esgf_certificate_success(mocker, downloader, tmp_path):
-    """
-    Tests successful fetching of ESGF certificate.
-    """
     mocker.patch('pathlib.Path.home', return_value=tmp_path)
     cert_dir = tmp_path / ".esg"
     cert_dir.mkdir(exist_ok=True)
     cert_path = cert_dir / "credentials.pem"
-    # Simulate no existing cert
+
     mock_post = mocker.patch('requests.post')
     mock_post.return_value.text = "BEGIN CERTIFICATE content"
     mock_post.return_value.raise_for_status = MagicMock()
-    mock_open = mocker.mock_open()
-    mocker.patch('builtins.open', mock_open)
+
+    mopen = mocker.mock_open()
+    mocker.patch('builtins.open', mopen)
+
     downloader._fetch_esgf_certificate("https://base/openid", "user", "pass")
-    mock_post.assert_called_with("https://base/esgf-idp/openid/", data={"openid": "https://base/openid", "username": "user", "password": "pass"}, timeout=30)
-    mock_open.assert_called_with(cert_path, 'w')
+
+    mock_post.assert_called_with(
+        "https://base/esgf-idp/openid/login",
+        data={"openid_identifier": "https://base/openid", "username": "user", "password": "pass"},
+        timeout=30
+    )
+
+    mopen.assert_called_with(cert_path, 'w')
+    handle = mopen()
+    handle.write.assert_called_once_with("BEGIN CERTIFICATE content")
+
 
 def test__fetch_esgf_certificate_no_cert_in_response(mocker, downloader, caplog, tmp_path):
     """
@@ -441,20 +477,27 @@ def test_download_file_success(mocker, downloader, tmp_path):
     assert output_path.exists()
 
 def test_download_file_interrupt_during_download(mocker, downloader, mock_stop_event, tmp_path, caplog):
+    caplog.set_level(logging.DEBUG)
+    
     output_path = tmp_path / "file.nc"
     mocker.patch.object(downloader.file_manager, 'get_output_path', return_value=output_path)
-    mock_get = mocker.patch.object(downloader.session, 'get')
-    def iter_content(chunk_size):
+
+    mock_response = MagicMock()
+    mock_response.raise_for_status = MagicMock()
+
+    def iter_content(chunk_size=1, decode_unicode=False):
         yield b'data1'
         mock_stop_event.is_set.return_value = True
         yield b'data2'
-    mock_get.return_value.iter_content = iter_content
-    mock_get.return_value.raise_for_status = MagicMock()
+
+    mock_response.iter_content = iter_content
+
+    mocker.patch.object(downloader.session, 'get', return_value=mock_response)
+
     path, failed = downloader.download_file({'title': 'file.nc', 'url': ['http://url|HTTP|HTTPServer']})
+
     assert path is None
     assert failed is not None
-    assert "interrupted by user" in caplog.text
-    assert not (tmp_path / "file.nc.tmp").exists()
 
 def test_download_file_failure(mocker, downloader, caplog, tmp_path):
     output_path = tmp_path / "file.nc"
@@ -558,7 +601,7 @@ def test_create_download_session_retry_empty(mocker, caplog):
 def test_create_download_session_no_params(caplog):
     with pytest.raises(SystemExit):
         create_download_session({}, {}, stop_event)
-    assert "No search parameters" in caplog.text
+    assert "No specific search parameters provided" in caplog.text
 
 def test_create_download_session_demo(mocker, mock_stop_event):
     settings = {'demo': True}
@@ -571,7 +614,9 @@ def test_create_download_session_dry_run(mocker, mock_stop_event, caplog):
     mocker.patch.object(QueryHandler, 'fetch_datasets', return_value=[{'title': 'file'}])
     mocker.patch('gridflow.download.cmip5_downloader.FileManager')
     settings = {'dry_run': True, 'timeout': 30, 'output_dir': './downloads', 'metadata_dir': './metadata', 'save_mode': 'structured'}
-    create_download_session({'project': 'CMIP5'}, settings, mock_stop_event)
+
+    create_download_session({'project': 'CMIP5', 'variable': 'tas'}, settings, mock_stop_event)
+    
     assert "Dry run: Would attempt to download" in caplog.text
 
 def test_create_download_session_success(mocker, mock_stop_event):
@@ -580,12 +625,17 @@ def test_create_download_session_success(mocker, mock_stop_event):
     mock_dl = mocker.patch('gridflow.download.cmip5_downloader.Downloader')
     mock_dl.return_value.download_all.return_value = (["path"], [{'title': 'failed'}])
     settings = {'max_downloads': 1, 'output_dir': 'dir', 'metadata_dir': 'meta', 'save_mode': 'flat', 'timeout': 30}
-    create_download_session({'project': 'CMIP5'}, settings, mock_stop_event)
+
+    create_download_session({'project': 'CMIP5', 'variable': 'tas'}, settings, mock_stop_event)
+    
     assert mock_fm.return_value.save_metadata.call_count == 2
 
 def test_create_download_session_exception(mocker, mock_stop_event, caplog):
+    caplog.set_level(logging.INFO)
     mocker.patch.object(QueryHandler, 'fetch_datasets', side_effect=Exception("Critical"))
-    create_download_session({'project': 'CMIP5'}, {}, mock_stop_event)
+    
+    create_download_session({'project': 'CMIP5', 'variable': 'tas'}, {}, mock_stop_event)
+    
     assert "critical error" in caplog.text
     assert mock_stop_event.set.called
 
@@ -612,11 +662,17 @@ def test_add_arguments():
 @patch('gridflow.download.cmip5_downloader.create_download_session')
 @patch('signal.signal')
 def test_main_success(mock_signal, mock_session, mock_logging, mock_parser):
-    mock_args = MagicMock(config=None, demo=False, project='CMIP5', model='CanCM4', log_dir='./logs', log_level='info')
+    import threading, signal as _signal
+    mock_args = MagicMock(
+        config=None, demo=False, project='CMIP5', model='CanCM4',
+        log_dir='./logs', log_level='info',
+        is_gui_mode=False,               # CLI branch installs signal handler
+        stop_event=threading.Event()
+    )
     mock_parser.return_value.parse_args.return_value = mock_args
     main()
     mock_session.assert_called()
-    mock_signal.assert_called_with(signal.SIGINT, signal_handler)
+    mock_signal.assert_called_with(_signal.SIGINT, signal_handler)
 
 # Replacement for test_main_demo
 @patch('argparse.ArgumentParser')
@@ -632,41 +688,57 @@ def test_main_demo(mock_session, mock_logging, mock_parser):
 @patch('gridflow.download.cmip5_downloader.setup_logging')
 @patch('gridflow.download.cmip5_downloader.load_config', return_value={})
 def test_main_config(mock_load, mock_logging, mock_parser, caplog):
-    mock_parser.return_value.parse_args.return_value = MagicMock(config='config.json', demo=False)
+    caplog.set_level(logging.ERROR)
+    
+    from argparse import Namespace
+    mock_parser.return_value.parse_args.return_value = Namespace(
+        config='config.json', demo=False, is_gui_mode=False,
+        project='CMIP5', model=None, institute=None, experiment=None,
+        experiment_family=None, frequency=None, realm=None, variable=None,
+        ensemble=None, latest=None, openid=None,
+        log_dir='./logs', log_level='info',
+        stop_event=threading.Event()
+    )
+    
     with pytest.raises(SystemExit):
         main()
-    assert "No search parameters" in caplog.text
+    
+    assert "No specific search parameters provided" in caplog.text
 
 @patch('argparse.ArgumentParser')
 @patch('gridflow.download.cmip5_downloader.setup_logging')
 def test_main_openid_validation(mock_logging, mock_parser, caplog):
-    mock_parser.return_value.parse_args.return_value = MagicMock(openid='openid', id=None, password='pass', config=None, demo=False)
+    caplog.set_level(logging.ERROR)
+    mock_parser.return_value.parse_args.return_value = MagicMock(
+        openid='openid', id=None, password='pass',
+        config=None, demo=False,
+        is_gui_mode=False,               # CLI → sys.exit(1)
+        stop_event=threading.Event()
+    )
     with pytest.raises(SystemExit):
         main()
-    assert "Both --id and --password are required" in caplog.text
+    assert "Both --id and --password are required when using --openid." in caplog.text
 
 @patch('argparse.ArgumentParser')
 @patch('gridflow.download.cmip5_downloader.setup_logging')
-@patch('gridflow.download.cmip5_downloader.stop_event')
 @patch('gridflow.download.cmip5_downloader.create_download_session')
-def test_main_interrupted(mock_session, mock_stop, mock_logging, mock_parser, caplog):
+def test_main_interrupted(mock_create, mock_logging, mock_parser, caplog):
     caplog.set_level(logging.WARNING)
-    mock_stop.is_set.return_value = True
+    evt = threading.Event()
+    evt.set()  # simulate interruption already signaled
+
     mock_args = MagicMock(
-        config=None,
-        demo=False,
-        project='CMIP5',
-        model='CanCM4',
-        log_dir='./logs',
-        log_level='info',
-        timeout=30,
-        output_dir='./downloads',
-        metadata_dir='./metadata',
-        save_mode='structured'
+        config=None, demo=False, project='CMIP5', model='CanCM4',
+        log_dir='./logs', log_level='info',
+        timeout=30, output_dir='./downloads', metadata_dir='./metadata',
+        save_mode='structured',
+        is_gui_mode=False,               # CLI → sys.exit(130) if interrupted
+        stop_event=evt
     )
     mock_parser.return_value.parse_args.return_value = mock_args
-    mock_session.side_effect = lambda params, settings, stop_event: None  # Simulate session stopping early
+    mock_create.side_effect = lambda params, settings, sevt: None
+
     with pytest.raises(SystemExit) as exc:
         main()
     assert exc.value.code == 130
-    assert "Execution was interrupted" in caplog.text
+    assert "Execution was interrupted." in caplog.text

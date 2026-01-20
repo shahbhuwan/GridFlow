@@ -1,225 +1,447 @@
-# GridFlow
+# GridFlow: A High-Performance Climate Data Pipeline
 
-GridFlow is a modular toolset for downloading and processing geospatial and climate data, including PRISM, DEM, CMIP5, CMIP6, and ERA5 datasets. It provides both a **Command-Line Interface (CLI)** for advanced users and a **Graphical User Interface (GUI)** for ease of use. GridFlow supports tasks such as data downloading, cropping, clipping, unit conversion, temporal aggregation, and catalog generation.
+**GridFlow** is a modular, high-performance toolset designed to streamline the acquisition and processing of massive geospatial and climate datasets. It provides a unified interface to access petabytes of data from **CMIP6**, **CMIP5**, **ERA5**, **PRISM**, and **global DEM repositories**—without requiring users to navigate complex web portals or write custom scraper scripts.
 
-**Author**: Bhuwan Shah  
-**License**: GNU AGPLv3  
-**Version**: 1.0  
-**GitHub**: [shahbhuwan/GridFlow](https://github.com/shahbhuwan/GridFlow)  
-**Contact**: [bshah@iastate.edu](mailto:bshah@iastate.edu)
-
----
-
-## Table of Contents
-
-- [Features](#features)
-- [Installation](#installation)
-- [Usage](#usage)
-  - [Command-Line Interface (CLI)](#command-line-interface-cli)
-  - [Graphical User Interface (GUI)](#graphical-user-interface-gui)
-- [Examples](#examples)
-- [Dependencies](#dependencies)
-- [Directory Structure](#directory-structure)
-- [Contributing](#contributing)
-- [License](#license)
-- [Acknowledgments](#acknowledgments)
+- **Author:** Bhuwan Shah  
+- **License:** GNU AGPLv3  
+- **Version:** 1.0  
+- **GitHub:** `shahbhuwan/GridFlow`  
+- **Contact:** bshah@iastate.edu  
 
 ---
 
-## Features
+## 📖 Statement of Need
 
-- **Data Download**:
-  - PRISM: Daily climate data (e.g., precipitation, temperature) at 4km or 800m resolution.
-  - DEM: Digital Elevation Models via OpenTopography (e.g., COP30, SRTM).
-  - CMIP5/CMIP6: Climate model data from ESGF nodes.
-  - ERA5: High-resolution climate reanalysis data.
-- **Data Processing**:
-  - Crop NetCDF files to a spatial bounding box.
-  - Clip NetCDF files using shapefiles (e.g., Iowa border).
-  - Convert units (e.g., Kelvin to Celsius, flux to mm/day).
-  - Temporally aggregate data (monthly, seasonal, annual).
-  - Generate JSON catalogs summarizing NetCDF metadata.
-- **User Interfaces**:
-  - CLI for scriptable, automated workflows.
-  - GUI with a modern, user-friendly interface built using PyQt5.
-- **Demo Mode**: Try sample configurations for quick testing.
-- **Cross-Platform**: Compatible with Windows, macOS, and Linux.
+In the era of big data, acquiring climate data remains a significant bottleneck for researchers, students, and independent analysts.
+
+### The core challenges
+- **The "Click Fatigue" Problem:** Archives like ESGF often require users to manually navigate faceted search interfaces, deal with pagination, and download files one-by-one via HTTP or brittle `wget` scripts.
+- **API Complexity:** Accessing reanalysis datasets (like ERA5) usually requires accounts, API keys, and queue-based systems.
+- **Technical Barrier:** Common post-processing tasks—cropping, clipping, aggregating, and converting NetCDF datasets—often require intermediate Python/R skills.
+
+### How GridFlow solves this
+✅ **Streamlined Access:** GUI + CLI interface for researchers, students, and non-programmers.  
+✅ **Parallel Downloads:** Multi-threaded downloading for high-speed bulk retrieval.  
+✅ **Direct Cloud Access:** ERA5 + DEM can be fetched directly from public AWS Open Data (no API keys required).  
+✅ **Built-in Processing:** Crop, clip, aggregate, convert, and catalog NetCDF datasets for immediate analysis.
 
 ---
 
-## Installation
+## 🚀 Installation
 
-### Prerequisites
+GridFlow is designed for portability. You do not need to be a Python expert to use it.
 
-- **Python**: Version 3.10 or higher.
-- **pip**: Python package manager.
-- **Virtual Environment** (recommended): To isolate dependencies.
+### Option 1: Standalone GUI (No Install Required)
+✅ **Simplest method**: No Python installation needed.
 
-### Step-by-Step Installation
-
-1. **Clone the Repository**:
-   ```bash
-   git clone https://github.com/shahbhuwan/GridFlow.git
-   cd GridFlow
-   ```
-
-2. **Create a Virtual Environment**:
-   ```bash
-   python -m venv test-env
-   source test-env/bin/activate  # On Windows: test-env\Scripts\activate
-   ```
-
-3. **Install Dependencies**:
-   Install the required packages listed in `requirements.txt` or directly via `setup.py`.
-   ```bash
-   pip install -r requirements.txt
-   ```
-   Alternatively, install the package directly:
-   ```bash
-   pip install .
-   ```
-
-4. **Verify Installation**:
-   Check if the CLI is accessible:
-   ```bash
-   gridflow --version
-   ```
-   This should output `GridFlow 1.0`.
-
-5. **Optional: Install for GUI**:
-   The GUI requires PyQt5, which is included in the dependencies. Ensure you have a compatible display environment (e.g., X11 on Linux, or a desktop environment on Windows/macOS).
-
-6. **Windows Executable (Optional)**:
-   A pre-built executable (`GridFlow.exe`) is available in the `dist` directory for Windows users. Run it directly to launch the GUI without installing Python:
-   ```bash
-   .\dist\GridFlow.exe
-   ```
-
-### Notes
-- Some datasets (e.g., ERA5, DEM) require API keys. Obtain them from:
-  - [CDS API](https://cds.climate.copernicus.eu/) for ERA5.
-  - [OpenTopography](https://opentopography.org/) for DEM.
-- CMIP5/CMIP6 may require ESGF credentials for restricted data.
+1. Download the `GridFlow_GUI.exe` from the **Releases** page.
+2. Double-click the `.exe` to launch the application.
 
 ---
 
-## Usage
+### Option 2: CLI Wrapper (Windows Batch)
+If you prefer the command line but want to avoid manual Python setup:
 
-GridFlow offers two interfaces: a CLI for advanced users and a GUI for beginners or those preferring a visual interface.
+1. Clone or download this repository
+2. Double-click `setup_cli.bat`
 
-### Command-Line Interface (CLI)
+This will automatically:
+- create a virtual environment  
+- install dependencies  
+- open a ready-to-use terminal for GridFlow commands
 
-The CLI is invoked using the `gridflow` command, followed by a subcommand for the desired tool (e.g., `prism`, `crop`). Run `gridflow -h` for help or `gridflow <command> -h` for detailed options.
+---
 
-**Basic Syntax**:
+### Option 3: Developer Setup (Pip)
+For developers integrating GridFlow into existing workflows:
+
 ```bash
-gridflow <command> [options]
-```
-
-**Available Commands**:
-- `prism`: Download PRISM climate data.
-- `dem`: Download Digital Elevation Models.
-- `cmip5`: Download CMIP5 climate model data.
-- `cmip6`: Download CMIP6 climate model data.
-- `era5`: Download ERA5-Land climate data.
-- `crop`: Crop NetCDF files to a bounding box.
-- `clip`: Clip NetCDF files using a shapefile.
-- `convert`: Convert units in NetCDF files.
-- `aggregate`: Temporally aggregate NetCDF files.
-- `catalog`: Generate a JSON catalog from NetCDF files.
-
-**Example**:
-Download sample PRISM data:
-```bash
-gridflow prism --demo
-```
-
-Run the CLI with verbose output:
-```bash
-gridflow prism --variable tmean --resolution 4km --start-date 2020-01-01 --end-date 2020-01-05 --output-dir ./downloads_prism --log-level verbose
-```
-
-### Graphical User Interface (GUI)
-
-The GUI is launched using the `gridflow-gui` command or the executable on Windows. It provides a user-friendly interface to configure and run the same tasks as the CLI.
-
-**Launch the GUI**:
-```bash
-gridflow-gui
-```
-Or, on Windows:
-```bash
-.\dist\GridFlow.exe
-```
-
-**GUI Features**:
-- Select data source (PRISM, DEM, CMIP5, CMIP6, ERA5) and process (Download, Crop, Clip, etc.).
-- Configure parameters via dropdowns, text fields, and file browsers.
-- Choose skill level (Beginner or Advanced) to simplify or expand options.
-- View real-time logs and progress bars.
-- Copy CLI commands for reproducibility.
-- Demo mode for quick testing.
-
-**Steps to Use**:
-1. Select a **Data Source** (e.g., PRISM) and **Process** (e.g., Download).
-2. Fill in required fields (e.g., API key, output directory).
-3. Optionally enable **Demo** mode for sample data.
-4. Click **Start** to run the task.
-5. Monitor progress and logs in the bottom panel.
-
----
-
-## Examples
-
-### CLI Examples
-1. **Download CMIP6 Data**:
-   ```bash
-   gridflow cmip6 --variable tas --experiment hist-1950 --model HadGEM3-GC31-LL --frequency day --resolution "250 km" --output-dir ./downloads_cmip6 --metadata-dir ./metadata_cmip6 --log-dir ./gridflow_logs --demo
-   ```
-
-2. **Crop NetCDF Files**:
-   ```bash
-   gridflow crop --input-dir ./downloads_cmip6 --output-dir ./cropped_cmip6 --min-lat 25.0 --max-lat 50.0 --min-lon -125.0 --max-lon -65.0 --log-dir ./gridflow_logs
-   ```
-
-3. **Clip with Iowa Shapefile**:
-   ```bash
-   gridflow clip --input-dir ./downloads_cmip6 --shapefile ./iowa_border/iowa_border.shp --output-dir ./clipped_cmip6 --log-dir ./gridflow_logs
-   ```
-
-### GUI Example
-1. **Download ERA5 Data**:
-   - Select **ERA5** as the Data Source and **Download** as the Process.
-   - Enter your CDS API key (UID:KEY format).
-   - Set Start Date to `2023-01-01` and End Date to `2023-01-31`.
-   - Choose a variable (e.g., `2m_temperature`) and an AOI (e.g., `corn_belt`).
-   - Specify output and log directories.
-   - Click **Start** to download.
-
----
-
-## Dependencies
-
-GridFlow relies on the following Python packages (listed in `setup.py`):
-- PyQt5 (>=5.15.0): For the GUI.
-- requests (>=2.28.0): For HTTP requests.
-- numpy (>=1.21.0): For numerical operations.
-- netCDF4 (>=1.5.8): For NetCDF file handling.
-- geopandas (>=0.10.0): For geospatial data processing.
-- shapely (>=1.8.0): For geometric operations.
-- python-dateutil (>=2.8.0): For date handling.
-- cdsapi (>=0.7.4): For ERA5 data access.
-
-Install them automatically during setup:
-```bash
-pip install .
+git clone https://github.com/shahbhuwan/GridFlow.git
+cd GridFlow
+pip install -r requirements.txt
+python setup.py install
 ```
 
 ---
 
-## Directory Structure
+## 🧪 Developer & Testing Setup
 
+GridFlow provides **two requirements files**:
+
+### `requirements.txt`
+General/runtime dependencies needed to **run GridFlow**.
+
+### `requirements_dev.txt`
+Developer/testing dependencies (pytest + tooling), including:
+- `pytest`
+- `pytest-cov`
+- `pytest-qt`
+- `pytest-mock`
+
+✅ **Recommended approach:** keep dev requirements as a superset.
+
+That means `requirements_dev.txt` should include:
+
+```txt
+-r requirements.txt
+pytest
+pytest-cov
+pytest-qt
+pytest-mock
 ```
+
+Then developers can install everything with:
+
+```bash
+pip install -r requirements_dev.txt
+```
+
+---
+
+## ✅ CLI Usage
+
+### Help Menu
+
+```bash
+gridflow -h
+```
+
+Run command-specific help using:
+
+```bash
+gridflow <command> -h
+```
+
+---
+
+## 🛠️ Data Download Modules
+
+GridFlow abstracts the complexity of different archives into a consistent interface.
+
+---
+
+## 1. CMIP6 Downloader (ESGF)
+
+Download CMIP6 climate model data from ESGF nodes using flexible filters.
+
+### **Command**
+```bash
+gridflow cmip6 [OPTIONS]
+```
+
+### **Argument Table**
+| Argument | Flag | Description | Example |
+|---------|------|-------------|---------|
+| Project | `-p` / `--project` | MIP project name | `CMIP6` |
+| Activity | `-a` / `--activity` | Activity ID | `ScenarioMIP` |
+| Experiment | `-e` / `--experiment` | Experiment ID | `ssp585` |
+| Model | `-m` / `--model` | Source model ID | `HadGEM3-GC31-LL` |
+| Variable | `-var` / `--variable` | Variable ID | `tas` |
+| Frequency | `-f` / `--frequency` | Time frequency | `day` |
+| Resolution | `-r` / `--resolution` | Nominal resolution | `"250 km"` |
+| Ensemble | `-en` / `--ensemble` | Variant label | `r1i1p1f1` |
+| Grid Label | `-g` / `--grid_label` | Grid label | `gn` |
+| Latest only | `--latest` | Only latest version | (flag) |
+| Replica | `--replica` | Include replicas | (flag) |
+| Data Node | `--data-node` | Restrict ESGF node | `esgf.ceda.ac.uk` |
+| Config | `-c` / `--config` | JSON config to prefill args | `cmip6_config.json` |
+| Output Dir | `-o` / `--output-dir` | Directory for downloads | `./downloads_cmip6` |
+| Metadata Dir | `-md` / `--metadata-dir` | Directory for metadata | `./metadata_cmip6` |
+| Log Dir | `-ld` / `--log-dir` | Directory for logs | `./gridflow_logs` |
+| Log Level | `-ll` / `--log-level` | minimal / verbose / debug | `debug` |
+| Save Mode | `-sm` / `--save-mode` | structured or flat | `structured` |
+| Workers | `-w` / `--workers` | Parallel workers | `8` |
+| Timeout | `-t` / `--timeout` | Network timeout (sec) | `60` |
+| Max Downloads | `--max-downloads` | Limit downloads per run | `10` |
+| Disable SSL verify | `--no-verify-ssl` | Turn off SSL verification | (flag) |
+| Prefer Nodes | `--prefer-nodes` | Host fragments to prioritize | `esgf.ceda.ac.uk` |
+| Resume | `--resume` | Resume partial downloads | (flag) |
+| OpenID | `--openid` | ESGF OpenID | `https://.../openid/user` |
+| Username | `--id` | ESGF username | `my_user` |
+| Password | `--password` | ESGF password | `mypassword` |
+| Retry Failed | `--retry-failed` | Retry from failed JSON list | `failed_downloads.json` |
+| Dry Run | `--dry-run` | Query only (no download) | (flag) |
+| Demo | `--demo` | Run demo query | (flag) |
+
+### Example Command
+
+```bash
+gridflow cmip6 -a HighResMIP -var tas -m HadGEM3-GC31-LL -e hist-1950 -f day -o ./my_data
+```
+
+---
+
+## 2. CMIP5 Downloader (ESGF)
+
+Download CMIP5 climate model data from ESGF nodes.
+
+### **Command**
+```bash
+gridflow cmip5 [OPTIONS]
+```
+
+### **Argument Table**
+| Argument | Flag | Description | Example |
+|---------|------|-------------|---------|
+| Project | `-p` / `--project` | Project name | `CMIP5` |
+| Model | `-m` / `--model` | Model name | `CanESM2` |
+| Institute | `-i` / `--institute` | Modeling institute | `CCCMA` |
+| Experiment | `-e` / `--experiment` | Experiment name | `historical` |
+| Experiment Family | `--experiment_family` | Family label | `RCP` |
+| Variable | `-var` / `--variable` | Variable name | `tas` |
+| Frequency | `-f` / `--frequency` | Time frequency | `mon` |
+| Realm | `-r` / `--realm` | Model realm | `atmos` |
+| Ensemble | `-en` / `--ensemble` | Ensemble member | `r1i1p1` |
+| Latest only | `-l` / `--latest` | Only get latest versions | (flag) |
+| Config | `-c` / `--config` | JSON config to prefill args | `cmip5_config.json` |
+| Output Dir | `-o` / `--output-dir` | Download directory | `./downloads_cmip5` |
+| Metadata Dir | `-md` / `--metadata-dir` | Metadata directory | `./metadata_cmip5` |
+| Log Dir | `-ld` / `--log-dir` | Log directory | `./gridflow_logs` |
+| Log Level | `-ll` / `--log-level` | minimal / verbose / debug | `debug` |
+| Save Mode | `-sm` / `--save-mode` | structured or flat | `structured` |
+| Workers | `-w` / `--workers` | Parallel workers | `4` |
+| Timeout | `-t` / `--timeout` | Network timeout (sec) | `30` |
+| Max Downloads | `--max-downloads` | Limit downloads per run | `10` |
+| Disable SSL verify | `--no-verify-ssl` | Turn off SSL verification | (flag) |
+| OpenID | `--openid` | ESGF OpenID | `https://.../openid/user` |
+| Username | `--id` | ESGF username | `my_user` |
+| Password | `--password` | ESGF password | `mypassword` |
+| Retry Failed | `--retry-failed` | Retry from failed JSON list | `failed_downloads.json` |
+| Dry Run | `--dry-run` | Query only (no download) | (flag) |
+| Demo | `--demo` | Run demo query | (flag) |
+
+### Example Command
+
+```bash
+gridflow cmip5 --demo
+```
+
+---
+
+## 3. ERA5 Downloader (AWS Open Data)
+
+Fetch ERA5(-Land) climate reanalysis data **directly from AWS S3** (no CDS API key required). fileciteturn3file5
+
+### **Command**
+```bash
+gridflow era5 [OPTIONS]
+```
+
+### **Argument Table**
+| Argument | Flag | Description | Example |
+|---------|------|-------------|---------|
+| Variables | `-var` / `--variables` | Comma-separated variable list | `t2m,precip,u10` |
+| Start Date | `-sd` / `--start-date` | Start date (YYYY-MM-DD) | `2021-01-01` |
+| End Date | `-ed` / `--end-date` | End date (YYYY-MM-DD) | `2021-12-31` |
+| List Variables | `-lv` / `--list-variables` | Print variable table | (flag) |
+| Output Dir | `-o` / `--output-dir` | Download directory | `./downloads_era5` |
+| Metadata Dir | `-md` / `--metadata-dir` | Metadata directory | `./metadata_era5` |
+| Log Dir | `-ld` / `--log-dir` | Log directory | `./gridflow_logs` |
+| Log Level | `-ll` / `--log-level` | minimal / verbose / debug | `minimal` |
+| Workers | `-w` / `--workers` | Parallel workers | `4` |
+| Dry Run | `--dry-run` | Query only (no download) | (flag) |
+| Demo | `--demo` | Run demo query | (flag) |
+| Config | `-c` / `--config` | JSON config file | `era5_config.json` |
+| Retry Failed | `--retry-failed` | Retry from JSON list | `failed_downloads.json` |
+
+### Example Command
+
+```bash
+gridflow era5 --variables t2m,precip --start-date 2021-01-01 --end-date 2021-03-01 -o ./era5_data
+```
+
+---
+
+## 4. PRISM Downloader (USA, High Resolution)
+
+High-resolution historical climate data for the contiguous United States.
+
+### **Command**
+```bash
+gridflow prism [OPTIONS]
+```
+
+### **Argument Table**
+| Argument | Flag | Description | Example |
+|---------|------|-------------|---------|
+| Variable(s) | `-var` / `--variable` | PRISM climate variable(s) | `tmean` |
+| Resolution | `-r` / `--resolution` | Spatial resolution | `4km` |
+| Time Step | `-ts` / `--time-step` | daily or monthly | `daily` |
+| Start Date | `-sd` / `--start-date` | Start date | `2020-01-01` |
+| End Date | `-ed` / `--end-date` | End date | `2020-01-31` |
+| Config | `-c` / `--config` | JSON config file | `prism_config.json` |
+| Output Dir | `-o` / `--output-dir` | Output directory | `./downloads_prism` |
+| Metadata Dir | `-md` / `--metadata-dir` | Metadata directory | `./metadata_prism` |
+| Log Dir | `-ld` / `--log-dir` | Log directory | `./gridflow_logs` |
+| Log Level | `-ll` / `--log-level` | minimal / verbose / debug | `minimal` |
+| Workers | `-w` / `--workers` | Parallel workers | `8` |
+| Timeout | `-t` / `--timeout` | Timeout in seconds | `30` |
+| Dry Run | `--dry-run` | Check availability only | (flag) |
+| Demo | `--demo` | Run demo query | (flag) |
+
+### Example Command
+
+```bash
+gridflow prism -var tmean -r 4km -sd 2020-01-01 -ed 2020-01-31 -o ./prism_data
+```
+
+---
+
+## 5. DEM Downloader (AWS Open Data)
+
+Downloads elevation tiles based on a bounding box using AWS Open Data sources. fileciteturn3file16
+
+### **Command**
+```bash
+gridflow dem [OPTIONS]
+```
+
+### **Argument Table**
+| Argument | Flag | Description | Example |
+|---------|------|-------------|---------|
+| Bounds | `--bounds` | Bounding box (N S E W) | `43.5 40.0 -90.0 -96.0` |
+| DEM Type | `--dem_type` | `COP30` (global) or `USGS10m` (USA) | `COP30` |
+| Output Dir | `-o` / `--output-dir` | Output directory | `./downloads_dem` |
+| Metadata Dir | `-md` / `--metadata-dir` | Metadata directory | `./metadata_dem` |
+| Log Dir | `-ld` / `--log-dir` | Log directory | `./gridflow_logs` |
+| Log Level | `-ll` / `--log-level` | minimal / verbose / debug | `minimal` |
+| Workers | `-w` / `--workers` | Parallel workers | `4` |
+| Dry Run | `--dry-run` | Query only | (flag) |
+| Demo | `--demo` | Run Iowa demo | (flag) |
+| Config | `-c` / `--config` | JSON config file | `dem_config.json` |
+| Retry Failed | `--retry-failed` | Retry from JSON list | `failed_downloads.json` |
+
+### Example Command
+
+```bash
+gridflow dem --bounds 43.5 40.3 -90.1 -96.7 --dem_type COP30 -o ./iowa_dem
+```
+
+---
+
+# ⚙️ Processing Modules
+
+GridFlow includes tools to prepare raw data for immediate analysis.
+
+---
+
+## 📋 Catalog Generator
+
+Scans a directory of downloaded NetCDF files and generates a `catalog.json` summarizing metadata. fileciteturn2file5
+
+### **Command**
+```bash
+gridflow catalog [OPTIONS]
+```
+
+### **Argument Table**
+| Argument | Flag | Description |
+|---------|------|-------------|
+| Input Dir | `-i` / `--input_dir` | Folder containing NetCDF files (recursive search) |
+| Output Dir | `-o` / `--output_dir` | Folder where catalog.json will be saved |
+| Log Dir | `-ld` / `--log-dir` | Log directory |
+| Log Level | `-ll` / `--log-level` | minimal / verbose / debug |
+| Demo | `--demo` | Run demo defaults |
+
+### Example
+```bash
+gridflow catalog -i ./downloads_cmip6 -o ./catalogs
+```
+
+---
+
+## ✂️ Spatial Operations
+
+### 1) Crop (Bounding Box)
+Crop NetCDF files to a rectangular Lat/Lon bounding box. fileciteturn2file8
+
+```bash
+gridflow crop -i ./downloads -o ./cropped --min_lat 40 --max_lat 45 --min_lon -96 --max_lon -90
+```
+
+| Argument | Flag | Description |
+|---------|------|-------------|
+| Input Dir | `-i` / `--input_dir` | Directory containing NetCDF files |
+| Output Dir | `-o` / `--output_dir` | Directory to save cropped files |
+| Min Lat | `--min_lat` | Minimum latitude |
+| Max Lat | `--max_lat` | Maximum latitude |
+| Min Lon | `--min_lon` | Minimum longitude |
+| Max Lon | `--max_lon` | Maximum longitude |
+| Workers | `-w` / `--workers` | Parallel workers |
+| Log Dir | `-ld` / `--log-dir` | Log directory |
+| Log Level | `-ll` / `--log-level` | minimal / verbose / debug |
+| Demo | `--demo` | Run demo defaults |
+
+---
+
+### 2) Clip (Shapefile)
+Clip NetCDF files to an irregular polygon (shapefile), with optional buffering. fileciteturn2file9
+
+```bash
+gridflow clip -i ./downloads -o ./clipped -s ./watershed.shp --buffer_km 2
+```
+
+| Argument | Flag | Description |
+|---------|------|-------------|
+| Input Dir | `-i` / `--input_dir` | Directory containing NetCDF files |
+| Output Dir | `-o` / `--output_dir` | Directory to save clipped files |
+| Shapefile | `-s` / `--shapefile` | Path to `.shp` file |
+| Buffer (km) | `--buffer_km` | Optional buffer distance |
+| Workers | `-w` / `--workers` | Parallel workers |
+| Log Dir | `-ld` / `--log-dir` | Log directory |
+| Log Level | `-ll` / `--log-level` | minimal / verbose / debug |
+| Demo | `--demo` | Run demo defaults |
+| Config | `-c` / `--config` | JSON config file |
+
+---
+
+## ⏳ Temporal & Unit Operations
+
+### 1) Aggregate (Temporal)
+Convert daily NetCDF data into monthly/seasonal/annual aggregates. fileciteturn2file7
+
+```bash
+gridflow aggregate -i ./raw_data -o ./monthly_data -var tas --output_frequency monthly --method mean
+```
+
+| Argument | Flag | Description |
+|---------|------|-------------|
+| Input Dir | `-i` / `--input_dir` | Directory containing NetCDF files |
+| Output Dir | `-o` / `--output_dir` | Output directory |
+| Variable | `-var` / `--variable` | Target variable |
+| Output Frequency | `--output_frequency` | monthly / seasonal / annual |
+| Method | `--method` | mean / sum / min / max |
+| Workers | `-w` / `--workers` | Parallel workers |
+| Log Dir | `-ld` / `--log-dir` | Log directory |
+| Log Level | `-ll` / `--log-level` | minimal / verbose / debug |
+| Demo | `--demo` | Run demo defaults |
+
+---
+
+### 2) Convert (Units)
+Convert NetCDF units (e.g., Kelvin → Celsius, Flux → mm/day). fileciteturn2file8
+
+```bash
+gridflow convert -i ./raw_data -o ./converted --variable tas --target_unit C
+```
+
+| Argument | Flag | Description |
+|---------|------|-------------|
+| Input Dir | `-i` / `--input_dir` | Directory containing NetCDF files |
+| Output Dir | `-o` / `--output_dir` | Output directory |
+| Variable | `--variable` | Variable ID |
+| Target Unit | `--target_unit` | `C`, `mm/day`, `km/h` |
+| Workers | `-w` / `--workers` | Parallel workers |
+| Log Dir | `-ld` / `--log-dir` | Log directory |
+| Log Level | `-ll` / `--log-level` | minimal / verbose / debug |
+| Demo | `--demo` | Run demo defaults |
+| Config | `-c` / `--config` | JSON config file |
+
+---
+
+## 📂 Directory Structure
+
+```text
 GridFlow/
 ├── gridflow/                   # Source code
 │   ├── download/              # Download modules (prism, dem, cmip5, cmip6, era5)
@@ -234,6 +456,7 @@ GridFlow/
 ├── dist/                      # Built distributions (wheel, tar.gz, executable)
 ├── setup.py                   # Package setup
 ├── requirements.txt           # Dependency list
+├── requirements_dev.txt       # Developer + testing dependency list
 ├── gridflow_logo.png          # Logo for GUI
 ├── gridflow_logo.svg          # SVG logo for GUI
 └── README.md                  # This file
@@ -241,29 +464,36 @@ GridFlow/
 
 ---
 
-## Contributing
+## 🤝 Contributing
 
-Contributions are welcome! To contribute:
+Contributions are welcome!
 
-1. Fork the repository.
-2. Create a feature branch (`git checkout -b feature/YourFeature`).
-3. Commit your changes (`git commit -m "Add YourFeature"`).
-4. Push to the branch (`git push origin feature/YourFeature`).
-5. Open a Pull Request.
+1. Fork the repository
+2. Create a feature branch:  
+   ```bash
+   git checkout -b feature/YourFeature
+   ```
+3. Commit your changes:  
+   ```bash
+   git commit -m "Add YourFeature"
+   ```
+4. Push to the branch:  
+   ```bash
+   git push origin feature/YourFeature
+   ```
+5. Open a Pull Request
 
-Please include tests and update documentation as needed. Follow the coding style in existing files (e.g., PEP 8 for Python).
+Please include tests and update documentation as needed. Follow existing coding style (PEP8 for Python).
+
+---
+
+## 📜 License
+
+GridFlow is licensed under the **GNU Affero General Public License v3.0 (AGPLv3)**. See the `LICENSE` file for details.
 
 ---
 
-## License
+## 🙏 Acknowledgments
 
-GridFlow is licensed under the **GNU Affero General Public License v3.0** (AGPLv3). See the [LICENSE](https://www.gnu.org/licenses/agpl-3.0.en.html) file for details.
-
----
-
-## Acknowledgments
-
-- **Open-Source Community**: For libraries like PyQt5, netCDF4, and geopandas.
-- **Data Providers**: PRISM, OpenTopography, ESGF, and CDS for climate and geospatial data.
-
----
+- **Open-Source Community:** for libraries like PyQt5, netCDF4, geopandas, rich, tqdm, and boto3  
+- **Data Providers:** PRISM, OpenTopography, ESGF, and CDS for climate and geospatial data

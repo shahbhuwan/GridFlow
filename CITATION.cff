@@ -1,0 +1,22 @@
+cff-version: 1.2.0
+message: "If you use GridFlow in your research, please cite it as below."
+title: "GridFlow: A High-Performance Climate Data Pipeline"
+type: software
+authors:
+  - family-names: Shah
+    given-names: Bhuwan
+repository-code: "https://github.com/shahbhuwan/GridFlow"
+url: "https://github.com/shahbhuwan/GridFlow"
+license: AGPL-3.0
+version: "1.0"
+date-released: "2025-01-01"
+keywords:
+  - climate data
+  - CMIP6
+  - CMIP5
+  - ERA5
+  - PRISM
+  - DEM
+  - NetCDF
+  - geospatial
+  - hydrology

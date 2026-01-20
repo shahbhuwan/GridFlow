@@ -1,0 +1,40 @@
+========================================================================== 
+How to Use the GridFlow Command-Line Interface (CLI)
+This tool has been installed in a dedicated virtual environment
+named 'gridflow_env' to keep its dependencies separate from your
+system's Python.
+
+To use the 'gridflow' command, you must follow these steps each time
+you open a new terminal.
+
+--- [ STEP 1: Activate the Environment ] ---
+Before you can run any commands, you must activate the virtual environment.
+   1. Open a new Command Prompt (or terminal).
+   2. Navigate to the GridFlow project folder where this file is located.
+   3. Run the following activation command:
+      call gridflow_env\Scripts\activate.bat
+
+You will know the environment is active because your command prompt
+will now start with '(gridflow_env)', like this:
+
+(gridflow_env) D:\Research\Github\GridFlow>_
+
+--- [ STEP 2: Use the GridFlow Command ] ---
+Once the environment is active, you can use the 'gridflow' command
+from anywhere.
+
+Here are some examples to get you started:
+   - To see the main help message and list all available tools:
+     gridflow -h
+   - To get detailed help for a specific tool (e.g., cmip6):
+     gridflow cmip6 -h
+   - To run a pre-configured demo download for PRISM data:
+     gridflow prism --demo
+
+--- [ STEP 3: Deactivate the Environment (Optional) ] ---
+When you are finished using the tool, you can deactivate the
+environment to return to your normal command prompt.
+
+Simply type the following command:
+
+deactivate

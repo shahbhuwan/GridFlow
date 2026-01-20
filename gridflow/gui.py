@@ -300,8 +300,28 @@ ABOUT_DIALOG_HTML = (
     "<p><b>GitHub:</b> <a href='https://github.com/shahbhuwan'>https://github.com/shahbhuwan/GridFlow</a><br>"
     "<b>Email:</b> <a href='mailto:bshah@iastate.edu'>bshah@iastate.edu</a></p>"
 )
+
 LABEL_COL = 120
+
 COMMON_VARIABLES = ["pr", "tas", "tasmax", "tasmin", "hurs", "huss"]
+POPULAR_CMIP6_ACTIVITIES = ["CMIP", "ScenarioMIP", "HighResMIP"]
+POPULAR_CMIP6_EXPERIMENTS = ["historical", "ssp126", "ssp245", "ssp370", "ssp585"]
+POPULAR_CMIP6_MODELS = [
+    "MPI-ESM1-2-LR", "CESM2", "CNRM-CM6-1", "EC-Earth3", 
+    "GFDL-ESM4", "HadGEM3-GC31-LL", "IPSL-CM6A-LR", 
+    "MIROC6", "NorESM2-LM", "TaiESM1", "UKESM1-0-LL"
+]
+POPULAR_CMIP6_FREQUENCIES = ["day", "mon", "Amon"]
+POPULAR_CMIP6_ENSEMBLES = ["r1i1p1f1", "r1i1p1f2", "r1i1p1f3"]
+
+# CMIP5 Popular Options
+POPULAR_CMIP5_EXPERIMENTS = ["historical", "rcp26", "rcp45", "rcp60", "rcp85"]
+POPULAR_CMIP5_MODELS = [
+    "CanESM2", "CCSM4", "GFDL-CM3", "GISS-E2-R", "HadGEM2-ES",
+    "IPSL-CM5A-LR", "MIROC5", "MPI-ESM-LR", "NorESM1-M"
+]
+POPULAR_CMIP5_FREQUENCIES = ["mon", "day", "6hr", "3hr"]
+POPULAR_CMIP5_ENSEMBLES = ["r1i1p1", "r1i1p2", "r2i1p1", "r3i1p1"]
 
 # Worker thread
 class WorkerThread(QThread):
@@ -356,24 +376,41 @@ class QtHandler(logging.Handler):
         super().__init__()
         self.log_signal = log_signal
         self.progress_signal = progress_signal
-        self.success_regex = re.compile(r"(Downloaded|Successfully (downloaded|cropped|clipped|converted|aggregated)): (.+)")
-        self.progress_regex = re.compile(r"Progress: (\d+)/(\d+) files")
-        self.completed_regex = re.compile(r"Completed: (\d+)/(\d+) files")
-        self.connect_regex = re.compile(r"Querying node: (.+)")
-        self.found_regex = re.compile(r"Found (\d+) (unique )?files")
+        self.minimal_mode = True  
+
+        # FIX: Added 'Query complete' and 'A critical' to regex so errors/status aren't hidden
+        self.minimal_filter_regex = re.compile(
+            r"^(Progress:|Completed:|Downloaded|Found |Querying|Query complete|Running|Parallel|All nodes failed|Process finished|Execution was interrupted|Connection timed out|No available files|Failed|Error|Critical|Exception|A critical|Clipped|Cropped|Converted|Aggregated)"
+            )
+
+        self.progress_regex = re.compile(r"Progress: (\d+)/(\d+)|Completed: (\d+)/(\d+)")
+        self.retry_warning_regex = re.compile(r"Retrying \(Retry\(total=(\d+),")
 
     def emit(self, record):
         msg = self.format(record)
-        progress_match = self.progress_regex.search(msg) or self.completed_regex.search(msg)
+        
+        # Always print CRITICAL errors regardless of mode
+        if record.levelno >= logging.CRITICAL:
+            self.log_signal.emit(f"❌ {msg}")
+            return
+
+        progress_match = self.progress_regex.search(msg)
         if progress_match:
-            current, total = map(int, progress_match.groups())
-            self.progress_signal.emit(current, total)
-            self.log_signal.emit(msg)
-            return
-        if self.connect_regex.search(msg) or self.success_regex.search(msg) or self.found_regex.search(msg):
-            self.log_signal.emit(msg)
-            return
-        if self.level != logging.INFO:
+            groups = [g for g in progress_match.groups() if g is not None]
+            if len(groups) == 2:
+                current, total = map(int, groups)
+                self.progress_signal.emit(current, total)
+
+        if self.minimal_mode:
+            retry_match = self.retry_warning_regex.search(msg)
+            if record.levelno == logging.WARNING and retry_match:
+                retries_left = int(retry_match.group(1))
+                self.log_signal.emit(f"Connection timed out. Retrying... ({retries_left} retries left)")
+                return 
+
+            if self.minimal_filter_regex.search(msg):
+                self.log_signal.emit(msg)
+        else:
             self.log_signal.emit(msg)
 
 # Main window
@@ -433,15 +470,28 @@ class GridFlowGUI(QMainWindow):
         self.resize(width, height)
 
     def init_logging(self):
-        log_dir = Path("C:/GridFlow/gridflow_logs")
+        log_dir = Path("./GridFlow/gridflow_logs")
         log_dir.mkdir(parents=True, exist_ok=True)
         setup_logging(log_dir, "minimal", prefix="gridflow_gui")
         self.log_signal.connect(self.on_log_message)
         self.progress_signal.connect(self.on_progress_update)
         self.qt_handler = QtHandler(self.log_signal, self.progress_signal)
-        self.qt_handler.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
+        self.qt_handler.setFormatter(logging.Formatter("%(message)s"))
         self.qt_handler.setLevel(logging.INFO)
         logging.getLogger().addHandler(self.qt_handler)
+
+    def on_verbosity_change(self, level_str: str):
+        """Updates the log level and mode of the GUI's QtHandler."""
+        log_levels = {
+            'minimal': logging.INFO,
+            'verbose': logging.INFO,
+            'debug': logging.DEBUG
+        }
+        level = log_levels.get(level_str.lower(), logging.INFO)
+        
+        if hasattr(self, 'qt_handler'):
+            self.qt_handler.setLevel(level)
+            self.qt_handler.minimal_mode = (level_str.lower() == 'minimal')
 
     def init_ui(self):
         scr = QApplication.primaryScreen().size()
@@ -535,7 +585,7 @@ class GridFlowGUI(QMainWindow):
 
         proc_lbl = mk_label("Process:")
         self.proc_combo = QComboBox()
-        self.proc_combo.addItems(["Download", "Crop", "Clip", "Unit Convert", "Temporal Aggregate", "Catalog"])
+        self.proc_combo.addItems(["Download", "Crop", "Clip", "Convert", "Aggregate", "Catalog"])
         self.proc_combo.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Fixed)
 
         self.src_combo.currentTextChanged.connect(
@@ -588,6 +638,8 @@ class GridFlowGUI(QMainWindow):
         cfg_row.addWidget(QLabel("Verbosity:"))
         self.verbosity_combo = QComboBox()
         self.verbosity_combo.addItems(["minimal", "verbose", "debug"])
+        self.verbosity_combo.setEnabled(False)
+        self.verbosity_combo.currentTextChanged.connect(self.on_verbosity_change)
         cfg_row.addWidget(self.verbosity_combo)
         cfg_row.addStretch(1)
         ulay.addLayout(cfg_row)
@@ -723,9 +775,14 @@ class GridFlowGUI(QMainWindow):
 
     def on_skill_change(self, level: str):
         workers, verb = PRESETS[level]
-        self.workers_edit.setReadOnly(level != "Advanced")
+        is_advanced = (level == "Advanced")
+
+        self.workers_edit.setReadOnly(not is_advanced)
         self.workers_edit.setText(str(workers))
+        
+        self.verbosity_combo.setEnabled(is_advanced)
         self.verbosity_combo.setCurrentText(verb)
+        
         self.update_form(self.proc_combo.currentText())
 
     def update_form(self, process: str) -> None:
@@ -812,23 +869,36 @@ class GridFlowGUI(QMainWindow):
             cb.setToolTip(tip)
             self.form_layout.addRow(mk_label(label, indent=indent, required=required), cb)
             self.arg_widgets[label.lower().replace(" ", "_")] = cb
-            return cb # FIX: This was missing, causing the crash.
+            return cb 
 
         indent_amount = 0
 
         if process == "Download":
             if src == "CMIP6":
                 add_combo("Project", ["CMIP6"], "CMIP6", "The project name (fixed to CMIP6).", indent=indent_amount, required=True)
-                add_line("Activity", "HighResMIP", "The CMIP6 activity (e.g., HighResMIP, ScenarioMIP).", indent=indent_amount, vocab=self.cmip6_activity_id, required=True)
+                
+                # --- FIX: Removed the duplicate 'add_line("Activity"...)' that was here ---
+
                 if skill_level == "Beginner":
-                    add_combo("Variable", COMMON_VARIABLES, "tas", "The climate variable to download.", indent=indent_amount, required=True)
+                    # Simplified Dropdowns
+                    add_combo("Activity", POPULAR_CMIP6_ACTIVITIES, "ScenarioMIP", "The CMIP6 activity.", indent=indent_amount, required=True)
+                    add_combo("Variable", COMMON_VARIABLES, "tas", "The climate variable.", indent=indent_amount, required=True)
+                    add_combo("Experiment", POPULAR_CMIP6_EXPERIMENTS, "ssp245", "The experiment identifier.", indent=indent_amount)
+                    add_combo("Model", POPULAR_CMIP6_MODELS, "MPI-ESM1-2-LR", "The climate model.", indent=indent_amount)
+                    add_combo("Frequency", POPULAR_CMIP6_FREQUENCIES, "day", "The temporal frequency.", indent=indent_amount, required=True)
+                    add_line("Resolution", "250 km", "The nominal resolution (e.g., 250 km, 50 km).", indent=indent_amount, vocab=self.cmip6_resolution, required=True)
+                    add_combo("Ensemble", POPULAR_CMIP6_ENSEMBLES, "r1i1p1f1", "The ensemble member.", indent=indent_amount)
                 else:
+                    # Full Advanced Text Fields with Autocomplete
+                    add_line("Activity", "HighResMIP", "The CMIP6 activity (e.g., HighResMIP, ScenarioMIP).", indent=indent_amount, vocab=self.cmip6_activity_id, required=True)
                     add_line("Variable", "tas", "The climate variable to download (e.g., tas for temperature).", indent=indent_amount, vocab=self.cmip6_variable_id, required=True)
-                add_line("Experiment", "hist-1950", "The experiment identifier (e.g., hist-1950, ssp585).", indent=indent_amount, vocab=self.cmip6_experiment_id)
-                add_line("Model", "HadGEM3-GC31-LL", "The climate model/source ID.", indent=indent_amount, vocab=self.cmip6_source_id)
-                add_line("Frequency", "day", "The temporal frequency (e.g., day, Amon).", indent=indent_amount, vocab=self.cmip6_frequency, required=True)
-                add_line("Resolution", "250 km", "The nominal resolution (e.g., 250 km, 50 km).", indent=indent_amount, vocab=self.cmip6_resolution, required=True)
-                add_line("Ensemble", "r1i1p1f1", "The ensemble member (e.g., r1i1p1f1).", indent=indent_amount, vocab=self.cmip6_variant_label)
+                    add_line("Experiment", "hist-1950", "The experiment identifier (e.g., hist-1950, ssp585).", indent=indent_amount, vocab=self.cmip6_experiment_id)
+                    add_line("Model", "HadGEM3-GC31-LL", "The climate model/source ID.", indent=indent_amount, vocab=self.cmip6_source_id)
+                    add_line("Frequency", "day", "The temporal frequency (e.g., day, Amon).", indent=indent_amount, vocab=self.cmip6_frequency, required=True)
+                    add_line("Resolution", "250 km", "The nominal resolution (e.g., 250 km, 50 km).", indent=indent_amount, vocab=self.cmip6_resolution, required=True)
+                    add_line("Ensemble", "r1i1p1f1", "The ensemble member (e.g., r1i1p1f1).", indent=indent_amount, vocab=self.cmip6_variant_label)
+
+                # Common Fields
                 add_file("Output Dir", "./downloads_cmip6", "Directory for downloaded NetCDF files.", dir_=True, indent=indent_amount, required=True)
                 add_file("Metadata Dir", "./metadata_cmip6", "Directory for metadata JSON files.", dir_=True, indent=indent_amount, required=True)
                 add_file("Log Dir", "./gridflow_logs", "Directory for log files.", dir_=True, indent=indent_amount, required=True)
@@ -853,14 +923,20 @@ class GridFlowGUI(QMainWindow):
 
             elif src == "CMIP5":
                 add_combo("Project", ["CMIP5"], "CMIP5", "The project name (fixed to CMIP5).", indent=indent_amount, required=True)
+                
                 if skill_level == "Beginner":
-                    add_combo("Variable", COMMON_VARIABLES, "tas", "The climate variable to download.", indent=indent_amount, required=True)
+                    add_combo("Variable", COMMON_VARIABLES, "tas", "The climate variable.", indent=indent_amount, required=True)
+                    add_combo("Model", POPULAR_CMIP5_MODELS, "CanESM2", "The CMIP5 model name.", indent=indent_amount, required=True)
+                    add_combo("Experiment", POPULAR_CMIP5_EXPERIMENTS, "historical", "The experiment identifier.", indent=indent_amount)
+                    add_combo("Frequency", POPULAR_CMIP5_FREQUENCIES, "mon", "The temporal frequency.", indent=indent_amount, required=True)
+                    add_combo("Ensemble", POPULAR_CMIP5_ENSEMBLES, "r1i1p1", "The ensemble member.", indent=indent_amount)
                 else:
                     add_line("Variable", "tas", "The climate variable to download (e.g., tas for temperature).", indent=indent_amount, vocab=self.cmip5_variable, required=True)
-                add_line("Model", "CanESM2", "The CMIP5 model name (e.g., CanESM2).", indent=indent_amount, vocab=self.cmip5_model, required=True)
-                add_line("Experiment", "historical", "The experiment identifier (e.g., historical, rcp45).", indent=indent_amount, vocab=self.cmip5_experiment)
-                add_line("Frequency", "mon", "The temporal frequency (e.g., mon, day).", indent=indent_amount, vocab=self.cmip5_time_frequency, required=True)
-                add_line("Ensemble", "r1i1p1", "The ensemble member (e.g., r1i1p1).", indent=indent_amount, vocab=self.cmip5_ensemble)
+                    add_line("Model", "CanESM2", "The CMIP5 model name (e.g., CanESM2).", indent=indent_amount, vocab=self.cmip5_model, required=True)
+                    add_line("Experiment", "historical", "The experiment identifier (e.g., historical, rcp45).", indent=indent_amount, vocab=self.cmip5_experiment)
+                    add_line("Frequency", "mon", "The temporal frequency (e.g., mon, day).", indent=indent_amount, vocab=self.cmip5_time_frequency, required=True)
+                    add_line("Ensemble", "r1i1p1", "The ensemble member (e.g., r1i1p1).", indent=indent_amount, vocab=self.cmip5_ensemble)
+
                 add_file("Output Dir", "./downloads_cmip5", "Directory for downloaded NetCDF files.", dir_=True, indent=indent_amount, required=True)
                 add_file("Metadata Dir", "./metadata_cmip5", "Directory for metadata JSON files.", dir_=True, indent=indent_amount, required=True)
                 add_file("Log Dir", "./gridflow_logs", "Directory for log files.", dir_=True, indent=indent_amount, required=True)
@@ -883,21 +959,45 @@ class GridFlowGUI(QMainWindow):
                     add_file("Retry Failed", "", "Path to failed_downloads.json to retry.", dir_=False, indent=indent_amount)
 
             elif src == "ERA5":
-                add_line("API Key", "", "Your CDS API key in UID:KEY format.", indent=indent_amount, required=True)
-                add_line("Start Date", "2023-01-01", "Start date (YYYY-MM-DD).", indent=indent_amount, required=True)
-                add_line("End Date", "2023-01-31", "End date (YYYY-MM-DD).", indent=indent_amount, required=True)
+                add_line("Start Date", "2021-01-01", "Start date (YYYY-MM-DD).", indent=indent_amount, required=True)
+                add_line("End Date", "2021-03-31", "End date (YYYY-MM-DD).", indent=indent_amount, required=True)
+
+                from gridflow.download.era5_downloader import VARIABLE_MAP
                 
+                combo_items = []
+                for code, info in VARIABLE_MAP.items():
+                    if isinstance(info, list):
+                        desc = "Composite: " + " & ".join([i.get('desc', '') for i in info])
+                    else:
+                        desc = info.get('desc', '')
+
+                    if len(desc) > 50: desc = desc[:47] + "..."
+                    
+                    combo_items.append(f"{code} ({desc})")
+
                 var_combo = QComboBox()
-                var_combo.addItems(self.era5_variables)
                 var_combo.setEditable(True)
+                
+                for i, display_text in enumerate(combo_items):
+                    clean_code = list(VARIABLE_MAP.keys())[i]
+                    var_combo.addItem(display_text, userData=clean_code)
+
                 var_combo.setInsertPolicy(QComboBox.NoInsert)
                 var_combo.completer().setCompletionMode(QCompleter.PopupCompletion)
                 var_combo.completer().setFilterMode(Qt.MatchContains)
-                var_combo.setToolTip("Select a variable to download. Start typing to filter the list.")
+                var_combo.setToolTip("Select a variable. The dropdown shows descriptions, but only the code will be used.")
+
+                def clean_variable_text(index):
+                    if index >= 0:
+                        clean_code = var_combo.itemData(index)
+                        if clean_code:
+                            var_combo.setCurrentText(clean_code)
+                
+                var_combo.currentIndexChanged.connect(clean_variable_text)
+
                 self.form_layout.addRow(mk_label("Variable", indent=indent_amount, required=True), var_combo)
                 self.arg_widgets["variables"] = var_combo
 
-                # --- Logic for AOI and Custom Bounds ---
                 aoi_options = list(AOI_BOUNDS.keys()) + ["custom"]
                 aoi_combo = add_combo("AOI", aoi_options, "corn_belt", "Predefined Area of Interest or custom.", indent=indent_amount, required=True)
                 
@@ -914,10 +1014,12 @@ class GridFlowGUI(QMainWindow):
                     bounds_input.setVisible(is_custom)
 
                 aoi_combo.currentTextChanged.connect(toggle_bounds_visibility)
-                toggle_bounds_visibility(aoi_combo.currentText()) # Set initial state
-                # --- End logic ---
+                toggle_bounds_visibility(aoi_combo.currentText()) 
 
                 add_file("Output Dir", "./downloads_era5", "Directory for downloaded NetCDF files.", dir_=True, indent=indent_amount, required=True)
+                
+                add_file("Metadata Dir", "./metadata_era5", "Directory for metadata JSON files.", dir_=True, indent=indent_amount, required=True)
+                
                 add_file("Log Dir", "./gridflow_logs", "Directory for log files.", dir_=True, indent=indent_amount, required=True)
                 add_chk("Demo", is_first_run(), "Run in demo mode with predefined settings.", indent=indent_amount)
 
@@ -935,10 +1037,10 @@ class GridFlowGUI(QMainWindow):
                 add_chk("Demo", is_first_run(), "Run in demo mode with predefined settings.", indent=indent_amount)
 
             elif src == "DEM":
-                add_line("API Key", "", "OpenTopography API key.", indent=indent_amount, required=True)
-                add_line("Bounds", "43.5 40.3 -90.1 -96.7", "Bounding box: NORTH SOUTH EAST WEST (degrees).", indent=indent_amount, required=True)
-                add_file("Output File", "./downloads_dem/dem_output.tif", "Path to save the GeoTIFF file.", dir_=False, indent=indent_amount, required=True)
-                add_combo("DEM Type", ["COP30", "SRTMGL1", "SRTMGL3", "AW3D30"], "COP30", "Type of DEM to download.", indent=indent_amount)
+                add_line("Bounds", "43.5 40.3 -91.1 -92.9", "N S E W (degrees). Space separated.", indent=indent_amount, required=True)
+                add_combo("DEM Type", ["COP30", "USGS10m"], "COP30", "Source: COP30 (Global 30m) or USGS10m (US 10m).", indent=indent_amount, required=True)
+                add_file("Output Dir", "./downloads_dem", "Directory for downloaded DEM tiles.", dir_=True, indent=indent_amount, required=True)
+                add_file("Metadata Dir", "./metadata_dem", "Directory for metadata JSON files.", dir_=True, indent=indent_amount, required=True)
                 add_file("Log Dir", "./gridflow_logs", "Directory for log files.", dir_=True, indent=indent_amount, required=True)
                 add_chk("Demo", is_first_run(), "Run in demo mode with predefined settings.", indent=indent_amount)
 
@@ -954,7 +1056,7 @@ class GridFlowGUI(QMainWindow):
 
         elif process == "Clip":
             add_file("Input Dir", "./downloads_cmip6", "Directory containing NetCDF files to clip.", dir_=True, indent=indent_amount, required=True)
-            add_file("Shapefile", "./iowa_border/iowa_border.shp", "Path to shapefile (.shp) for clipping.", dir_=False, indent=indent_amount, required=True)
+            add_file("Shapefile", "./conus_border/conus.shp", "Path to shapefile (.shp) for clipping.", dir_=False, indent=indent_amount, required=True)
             add_file("Output Dir", "./clipped_cmip6", "Directory to save clipped NetCDF files.", dir_=True, indent=indent_amount, required=True)
             add_file("Log Dir", "./gridflow_logs", "Directory for log files.", dir_=True, indent=indent_amount, required=True)
             add_line("Buffer KM", "0", "Buffer distance in kilometers.", indent=indent_amount)
@@ -1081,7 +1183,7 @@ class GridFlowGUI(QMainWindow):
                         self.log_text.append(f"❗ {field.replace('_', ' ').title()} is required for CMIP5 Download")
                         return
             if src == "ERA5":
-                required = ["api_key", "start_date", "end_date", "variables", "output_dir", "log_dir"]
+                required = ["start_date", "end_date", "variables", "output_dir", "log_dir"]
                 if args_dict.get("aoi") == "custom":
                     required.append("bounds")
                 
@@ -1090,18 +1192,17 @@ class GridFlowGUI(QMainWindow):
                         self.log_text.append(f"❗ {field.replace('_', ' ').title()} is required for ERA5 Download")
                         return
                 
-                # Parse custom bounds if provided
                 if args_dict.get("aoi") == "custom" and args_dict.get("bounds"):
                     try:
                         bounds_list = [float(x.strip()) for x in args_dict["bounds"].split(',')]
                         if len(bounds_list) != 4: raise ValueError
                         args_dict["bounds"] = bounds_list
-                        args_dict["aoi"] = None # Ensure --aoi is not sent
+                        args_dict["aoi"] = None 
                     except (ValueError, AttributeError):
                         self.log_text.append("❗ Invalid Bounds format. Use comma-separated: N, W, S, E")
                         return
                 else:
-                    args_dict["bounds"] = None # Ensure --bounds is not sent
+                    args_dict["bounds"] = None 
             elif src == "PRISM":
                 required = ["variable", "resolution", "time_step", "start_date", "end_date", "output_dir", "metadata_dir", "log_dir"]
                 for field in required:
@@ -1109,21 +1210,25 @@ class GridFlowGUI(QMainWindow):
                         self.log_text.append(f"❗ {field.replace('_', ' ').title()} is required for PRISM Download")
                         return
             elif src == "DEM":
-                required = ["api_key", "bounds", "output_file", "log_dir"]
-                for field in required:
-                    if not args_dict.get(field):
-                        self.log_text.append(f"❗ {field.replace('_', ' ').title()} is required for DEM Download")
+                required = ["bounds", "output_dir", "log_dir"]
+                
+                if not args_dict.get("demo"):
+                    for field in required:
+                        if not args_dict.get(field):
+                            self.log_text.append(f"❗ {field.replace('_', ' ').title()} is required for DEM Download")
+                            return
+                    
+                    # Parse bounds string "N S E W" -> List[float]
+                    bounds_str = args_dict.get("bounds", "")
+                    try:
+                        cleaned = bounds_str.replace(',', ' ').split()
+                        bounds = [float(x) for x in cleaned]
+                        if len(bounds) != 4:
+                            raise ValueError
+                        args_dict["bounds"] = bounds
+                    except ValueError:
+                        self.log_text.append("❗ Invalid Bounds format. Use: NORTH SOUTH EAST WEST (e.g., 43.5 40.3 -91.1 -92.9)")
                         return
-                # Parse bounds
-                bounds = args_dict["bounds"]
-                try:
-                    bounds = [float(x) for x in bounds.split()]
-                    if len(bounds) != 4:
-                        raise ValueError
-                    args_dict["bounds"] = bounds
-                except ValueError:
-                    self.log_text.append("❗ Invalid Bounds format. Use: NORTH SOUTH EAST WEST (e.g., 43.5 40.3 -90.1 -96.7)")
-                    return
 
             # Warn about missing authentication for CMIP5/CMIP6
             if src in ["CMIP5", "CMIP6"] and not args_dict.get("demo") and not any([args_dict.get("id"), args_dict.get("password"), args_dict.get("openid")]):
@@ -1151,7 +1256,7 @@ class GridFlowGUI(QMainWindow):
                         self.log_text.append(f"❗ {field.replace('_', ' ').title()} is required for Clip")
                         return
 
-        elif proc == "Unit Convert":
+        elif proc == "Convert":
             required = ["input_dir", "output_dir", "log_dir", "variable", "target_unit"]
             for field in required:
                 if not args_dict.get(field):
@@ -1178,6 +1283,10 @@ class GridFlowGUI(QMainWindow):
         args_dict["test"] = False
         args_dict["dry_run"] = False
 
+        if args_dict.get('demo'):
+            if 'max_downloads' not in args_dict or not args_dict.get('max_downloads'):
+                args_dict['max_downloads'] = 5
+
         # Build command string for display
         command_parts = ["gridflow"]
         subcommand_map = {
@@ -1202,9 +1311,6 @@ class GridFlowGUI(QMainWindow):
             else:
                 command_parts.append(f"--{key.replace('_', '-')} \"{value}\"")
 
-        command_parts.append(f"--workers {args_dict['workers']}")
-        command_parts.append(f"--log-level {args_dict['log_level']}")
-
         command_str = " ".join(command_parts)
         self.command_display.setText(f"Running: {command_str}")
         self.command_display.setStyleSheet("font-size: 12pt; font-weight: bold; color: #ffffff; background: #4a90e2; padding: 8px; border-radius: 4px; border: none;")
@@ -1214,6 +1320,8 @@ class GridFlowGUI(QMainWindow):
         class _Args:
             def __init__(self, **kw):
                 self.__dict__.update(kw)
+
+        args_dict['is_gui_mode'] = True
         cli_args = _Args(**args_dict)
 
         dispatch = {
@@ -1234,12 +1342,16 @@ class GridFlowGUI(QMainWindow):
         self.worker_thread.log_message.connect(self.on_log_message)
         self.worker_thread.progress_update.connect(self.on_progress_update)
         self.worker_thread.task_completed.connect(self.on_task_completed)
+        self.worker_thread.error_occurred.connect(self.on_log_message)
         self.worker_thread.stopped.connect(self.on_task_stopped)
         self.worker_thread.stopping.connect(self.on_stopping)
         self.worker_thread.start()
 
         self.start_btn.setEnabled(False)
         self.stop_btn.setEnabled(True)
+        if self.log_text.toPlainText().strip():
+            self.log_text.append("\n" + "─" * 50 + "\n")
+
         self.log_text.append(f"▶ Starting {src} — {proc} …")
 
     def stop_task(self) -> None:
@@ -1301,19 +1413,18 @@ class GridFlowGUI(QMainWindow):
         self.stop_btn.setEnabled(False)
         self.progress_bar.setValue(0)
         self.log_text.append("✅ Task completed" if ok else "❌ Task failed")
-        if self.skill_combo.currentText() == "Advanced":
-            current_text = self.command_display.toPlainText()
-            if ok:
-                self.command_display.setText(current_text.replace("Running:", "Completed:"))
-                self.command_display.setStyleSheet("font-size: 12pt; font-weight: bold; color: #ffffff; background: #28a745; padding: 8px; border-radius: 4px; border: none;")
-            else:
-                self.command_display.setText(current_text.replace("Running:", "Failed:"))
-                self.command_display.setStyleSheet("font-size: 12pt; font-weight: bold; color: #ffffff; background: #dc3545; padding: 8px; border-radius: 4px; border: none;")
-            self.command_display.setVisible(True)
-            self.copy_button.setVisible(True)
+
+        # This logic now applies to all skill levels
+        current_text = self.command_display.toPlainText()
+        if ok:
+            self.command_display.setText(current_text.replace("Running:", "Completed:"))
+            self.command_display.setStyleSheet("font-size: 12pt; font-weight: bold; color: #ffffff; background: #28a745; padding: 8px; border-radius: 4px; border: none;")
         else:
-            self.command_display.setVisible(False)
-            self.copy_button.setVisible(False)
+            self.command_display.setText(current_text.replace("Running:", "Failed:"))
+            self.command_display.setStyleSheet("font-size: 12pt; font-weight: bold; color: #ffffff; background: #dc3545; padding: 8px; border-radius: 4px; border: none;")
+        
+        self.command_display.setVisible(True)
+        self.copy_button.setVisible(True)
 
     # def update_logo_pixmap(self):
     #     if hasattr(self, '_cached_logo_pixmap'):

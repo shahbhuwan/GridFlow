@@ -1,136 +1,116 @@
-# tests/test_logging_utils.py
+# tests/test_cli.py
 
-import logging
 import sys
-from unittest.mock import MagicMock, patch
-
 import pytest
-
-from gridflow.utils.logging_utils import MinimalFilter, setup_logging
-
-# ############################################################################
-# Tests for MinimalFilter
-# ############################################################################
+from unittest.mock import MagicMock, patch
+from gridflow.cli import main
 
 @pytest.fixture
-def minimal_filter():
-    """Provides an instance of the MinimalFilter."""
-    return MinimalFilter()
+def mock_args():
+    """Mock standard CLI arguments with safe defaults."""
+    with patch('argparse.ArgumentParser.parse_args') as mock_parse:
+        args = MagicMock()
+        args.config = None
+        args.demo = False
+        args.is_gui_mode = False
+        args.log_dir = '.'
+        args.log_level = 'info'
+        args.stop_event.is_set.return_value = False
+        
+        mock_parse.return_value = args
+        yield mock_parse
 
-def test_minimal_filter_allows_non_info_levels(minimal_filter):
-    """Test that the filter allows all log levels other than INFO."""
-    debug_record = logging.LogRecord('name', logging.DEBUG, 'path', 1, 'msg', (), None)
-    warning_record = logging.LogRecord('name', logging.WARNING, 'path', 1, 'msg', (), None)
-    error_record = logging.LogRecord('name', logging.ERROR, 'path', 1, 'msg', (), None)
-    
-    assert minimal_filter.filter(debug_record) is True
-    assert minimal_filter.filter(warning_record) is True
-    assert minimal_filter.filter(error_record) is True
+def test_cli_no_args_exits():
+    """Ensure running without arguments prints help/usage (handled by argparse)."""
+    with patch('sys.argv', ['gridflow']):
+        with pytest.raises(SystemExit):
+            main()
 
-def test_minimal_filter_blocks_general_info_messages(minimal_filter):
-    """Test that the filter blocks generic INFO messages."""
-    blocked_record = logging.LogRecord('name', logging.INFO, 'path', 1, 'A generic info message.', (), None)
-    assert minimal_filter.filter(blocked_record) is False
+@patch('gridflow.cli.prism_downloader.main')
+def test_cli_dispatch_prism(mock_prism_main, mock_args):
+    """Test that 'gridflow prism' calls the prism downloader."""
+    mock_args.return_value.command = 'prism'
+    main()
+    mock_prism_main.assert_called_once()
 
-@pytest.mark.parametrize("allowed_message", [
-    "Progress: 1/10",
-    "Completed: 10/10 files processed.",
-    "Downloaded file.zip",
-    "Found 5 files to process.",
-    "Retrying download...",
-    "Querying node: esgf.llnl.gov",
-    "All nodes failed to respond.",
-    "Process finished.",
-    "Execution was interrupted"
-])
-def test_minimal_filter_allows_specific_info_messages(minimal_filter, allowed_message):
-    """Test that the filter allows specific, whitelisted INFO messages."""
-    allowed_record = logging.LogRecord('name', logging.INFO, 'path', 1, allowed_message, (), None)
-    assert minimal_filter.filter(allowed_record) is True
+@patch('gridflow.cli.cmip6_downloader.main')
+def test_cli_dispatch_cmip6(mock_cmip6_main, mock_args):
+    """Test that 'gridflow cmip6' calls the cmip6 downloader."""
+    mock_args.return_value.command = 'cmip6'
+    main()
+    mock_cmip6_main.assert_called_once()
 
-# ############################################################################
-# Tests for setup_logging
-# ############################################################################
+@patch('gridflow.cli.cmip5_downloader.main')
+def test_cli_dispatch_cmip5(mock_cmip5_main, mock_args):
+    """Test that 'gridflow cmip5' calls the cmip5 downloader."""
+    mock_args.return_value.command = 'cmip5'
+    main()
+    mock_cmip5_main.assert_called_once()
 
-@pytest.fixture(autouse=True)
-def reset_logging():
-    """Fixture to ensure the logging module is in a clean state for each test."""
-    yield
-    root_logger = logging.getLogger()
-    for handler in root_logger.handlers[:]:
-        root_logger.removeHandler(handler)
-    root_logger.setLevel(logging.WARNING)
+@patch('gridflow.cli.era5_downloader.main')
+def test_cli_dispatch_era5(mock_era5_main, mock_args):
+    """Test that 'gridflow era5' calls the era5 downloader."""
+    mock_args.return_value.command = 'era5'
+    main()
+    mock_era5_main.assert_called_once()
 
-def test_setup_logging_creates_directory_and_file(tmp_path):
-    """Test that the function creates the log directory and file."""
-    log_dir = tmp_path / "logs"
-    setup_logging(str(log_dir), "verbose", "test_prefix")
-    
-    assert log_dir.is_dir()
-    log_files = list(log_dir.glob("test_prefix_*.log"))
-    assert len(log_files) == 1
+@patch('gridflow.cli.dem_downloader.main')
+def test_cli_dispatch_dem(mock_dem_main, mock_args):
+    """Test that 'gridflow dem' calls the dem downloader."""
+    mock_args.return_value.command = 'dem'
+    main()
+    mock_dem_main.assert_called_once()
 
-@patch('logging.getLogger')
-def test_setup_logging_verbose_level(mock_getLogger, tmp_path):
-    """Test the 'verbose' logging configuration."""
-    mock_logger = MagicMock()
-    mock_getLogger.return_value = mock_logger
-    
-    setup_logging(str(tmp_path), "verbose")
-    
-    mock_logger.setLevel.assert_called_with(logging.INFO)
-    assert mock_logger.addHandler.call_count == 2
-    
-    file_handler = mock_logger.addHandler.call_args_list[0][0][0]
-    console_handler = mock_logger.addHandler.call_args_list[1][0][0]
-    
-    assert file_handler.level == logging.INFO
-    assert console_handler.level == logging.INFO
-    assert not any(isinstance(f, MinimalFilter) for f in console_handler.filters)
+@patch('gridflow.cli.crop_netcdf.main')
+def test_cli_dispatch_crop(mock_crop_main, mock_args):
+    """Test that 'gridflow crop' calls the crop script."""
+    mock_args.return_value.command = 'crop'
+    main()
+    mock_crop_main.assert_called_once()
 
-@patch('logging.getLogger')
-def test_setup_logging_minimal_level(mock_getLogger, tmp_path):
-    """Test the 'minimal' logging configuration."""
-    mock_logger = MagicMock()
-    mock_getLogger.return_value = mock_logger
-    
-    setup_logging(str(tmp_path), "minimal")
-    
-    mock_logger.setLevel.assert_called_with(logging.INFO)
-    assert mock_logger.addHandler.call_count == 2
-    
-    file_handler = mock_logger.addHandler.call_args_list[0][0][0]
-    console_handler = mock_logger.addHandler.call_args_list[1][0][0]
-    
-    assert file_handler.level == logging.INFO
-    assert any(isinstance(f, MinimalFilter) for f in console_handler.filters)
+@patch('gridflow.cli.clip_netcdf.main')
+def test_cli_dispatch_clip(mock_clip_main, mock_args):
+    """Test that 'gridflow clip' calls the clip script."""
+    mock_args.return_value.command = 'clip'
+    main()
+    mock_clip_main.assert_called_once()
 
-@patch('logging.getLogger')
-def test_setup_logging_debug_level(mock_getLogger, tmp_path):
-    """Test the 'debug' logging configuration."""
-    mock_logger = MagicMock()
-    mock_getLogger.return_value = mock_logger
-    
-    setup_logging(str(tmp_path), "debug")
-    
-    mock_logger.setLevel.assert_called_with(logging.DEBUG)
-    assert mock_logger.addHandler.call_count == 2
-    
-    file_handler = mock_logger.addHandler.call_args_list[0][0][0]
-    console_handler = mock_logger.addHandler.call_args_list[1][0][0]
-    
-    assert file_handler.level == logging.DEBUG
-    assert console_handler.level == logging.DEBUG
-    
-    formatter = file_handler.formatter
-    assert '%(threadName)s' in formatter._fmt
+@patch('gridflow.cli.unit_convert.main')
+def test_cli_dispatch_convert(mock_convert_main, mock_args):
+    """Test that 'gridflow convert' calls the unit converter."""
+    mock_args.return_value.command = 'convert'
+    main()
+    mock_convert_main.assert_called_once()
 
-def test_setup_logging_fallback_on_exception(tmp_path, capsys, mocker):
-    """Test that logging falls back to basicConfig if setup fails."""
-    mocker.patch('pathlib.Path.mkdir', side_effect=OSError("Permission denied"))
-    
-    setup_logging(str(tmp_path), "verbose")
-    
+@patch('gridflow.cli.temporal_aggregate.main')
+def test_cli_dispatch_aggregate(mock_agg_main, mock_args):
+    """Test that 'gridflow aggregate' calls the aggregator."""
+    mock_args.return_value.command = 'aggregate'
+    main()
+    mock_agg_main.assert_called_once()
+
+@patch('gridflow.cli.catalog_generator.main')
+def test_cli_dispatch_catalog(mock_catalog_main, mock_args):
+    """Test that 'gridflow catalog' calls the catalog generator."""
+    mock_args.return_value.command = 'catalog'
+    main()
+    mock_catalog_main.assert_called_once()
+
+def test_cli_keyboard_interrupt(mock_args):
+    """Test that Ctrl+C is handled gracefully (exit code 130)."""
+    mock_args.return_value.command = 'prism'
+    with patch('gridflow.cli.prism_downloader.main', side_effect=KeyboardInterrupt):
+        with pytest.raises(SystemExit) as e:
+            main()
+        assert e.value.code == 130
+
+def test_cli_general_exception(mock_args, capsys):
+    """Test that generic exceptions are caught and printed to stderr."""
+    mock_args.return_value.command = 'prism'
+    with patch('gridflow.cli.prism_downloader.main', side_effect=ValueError("Test Error")):
+        with pytest.raises(SystemExit) as e:
+            main()
+        assert e.value.code == 1
+
     captured = capsys.readouterr()
-    assert "FATAL: Failed to initialize logging" in captured.err
-    assert "Using basic console logging" in captured.err
+    assert "Error: Test Error" in captured.err

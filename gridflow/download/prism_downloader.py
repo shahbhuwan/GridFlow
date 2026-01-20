@@ -25,6 +25,13 @@ from dateutil.relativedelta import relativedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed, Future
 from typing import List, Dict, Optional, Tuple, Any
 
+try:
+    from tqdm import tqdm
+    from rich.console import Console
+    HAS_UI_LIBS = True
+except ImportError:
+    HAS_UI_LIBS = False
+
 # --- Local Imports ---
 try:
     from gridflow.utils.logging_utils import setup_logging
@@ -91,23 +98,42 @@ class AvailabilityChecker:
         except requests.RequestException:
             return False
 
-    def find_available_files(self, potential_files: List[Dict]) -> List[Dict]:
+    def find_available_files(self, potential_files: List[Dict], is_gui_mode: bool = False) -> List[Dict]:
         """Filters a list of potential files to find ones that actually exist on the server."""
         available_files = []
-        with ThreadPoolExecutor(max_workers=self.workers, thread_name_prefix="Checker") as executor:
-            future_to_file = {executor.submit(self.check_url, f['url']): f for f in potential_files}
-            for future in as_completed(future_to_file):
-                if self._stop_event.is_set(): break
-                if future.result():
-                    available_files.append(future_to_file[future])
-        return available_files
+        
+        use_rich = HAS_UI_LIBS and not is_gui_mode
+        status_context = None
+
+        if use_rich:
+            console = Console()
+            status_context = console.status(f"[bold green]Checking availability for {len(potential_files)} files (PRISM server)...", spinner="dots")
+            status_context.start()
+        else:
+            logging.info(f"Checking availability for {len(potential_files)} files...")
+
+        try:
+            with ThreadPoolExecutor(max_workers=self.workers, thread_name_prefix="Checker") as executor:
+                future_to_file = {executor.submit(self.check_url, f['url']): f for f in potential_files}
+                
+                for future in as_completed(future_to_file):
+                    if self._stop_event.is_set(): break
+                    if future.result():
+                        available_files.append(future_to_file[future])
+            
+            if status_context: status_context.stop()
+            return available_files
+            
+        finally:
+            if status_context: status_context.stop()
 
 class Downloader:
     """Manages the file download process using a thread pool."""
-    def __init__(self, stop_event: threading.Event, workers: int, timeout: int):
+    def __init__(self, stop_event: threading.Event, workers: int, timeout: int, is_gui_mode: bool = False):
         self._stop_event = stop_event
         self.workers = workers
         self.timeout = timeout
+        self.is_gui_mode = is_gui_mode
         self.successful_downloads = 0
         self.executor = None
 
@@ -136,7 +162,7 @@ class Downloader:
                         raise requests.exceptions.RequestException("Download interrupted by user.")
                     f.write(chunk)
             
-            logging.info(f"Downloaded {output_path.name}")
+            logging.debug(f"Downloaded {output_path.name}")
             return file_info
         except requests.RequestException as e:
             logging.warning(f"[Worker-{thread_id}] Download failed for {output_path.name}: {e}")
@@ -146,66 +172,160 @@ class Downloader:
     def download_all(self, files: List[Dict]) -> Tuple[List[Dict], List[Dict]]:
         """Manages the download of a list of files using a thread pool."""
         downloaded, failed = [], []
-        if not files: return [], []
+        if not files:
+            return [], []
 
         self.executor = ThreadPoolExecutor(max_workers=self.workers, thread_name_prefix='Downloader')
-        future_to_file = {self.executor.submit(self.download_file, f): f for f in files}
+
+        future_to_file = {}
+        for f in files:
+            ft = self.executor.submit(self.download_file, f)
+            setattr(ft, "_original_file", f)
+            future_to_file[ft] = f
+
+        use_tqdm = HAS_UI_LIBS and not self.is_gui_mode
+        
+        futures_iter = as_completed(future_to_file)
+        
+        if use_tqdm:
+            futures_iter = tqdm(
+                futures_iter, 
+                total=len(files), 
+                unit="file", 
+                desc="Downloading", 
+                ncols=90, 
+                bar_format='  {l_bar}{bar}{r_bar}'
+            )
 
         try:
-            for i, future in enumerate(as_completed(future_to_file)):
-                logging.info(f"Progress: {i + 1}/{len(files)} files processed.")
-                if self._stop_event.is_set(): break
-                original_file = future_to_file[future]
-                result = future.result()
-                if result:
-                    downloaded.append(result)
-                else:
-                    failed.append(original_file)
+            for i, future in enumerate(futures_iter):
+                if self.is_gui_mode:
+                    logging.info(f"Progress: {i + 1}/{len(files)} files processed.")
+                
+                if self._stop_event.is_set():
+                    break
+
+                original_file = future_to_file.get(future, getattr(future, "_original_file", None))
+                file_name = original_file['output_path'].name if original_file else "unknown_file"
+
+                try:
+                    result = future.result()
+                    if result:
+                        downloaded.append(result)
+                        if use_tqdm:
+                            short_name = (file_name[:50] + '..') if len(file_name) > 50 else file_name
+                            tqdm.write(f"  ✔ Downloaded {short_name}")
+                        elif self.is_gui_mode:
+                            logging.info(f"Downloaded {file_name}")
+                    else:
+                        failed.append(original_file if original_file else {"file": "unknown"})
+                        if use_tqdm:
+                            tqdm.write(f"  ✖ Failed: {file_name}")
+                            
+                except Exception as e:
+                    failed.append(original_file if original_file else {"file": "unknown"})
+                    if use_tqdm:
+                        tqdm.write(f"  ✖ Failed: {file_name}")
+                    logging.debug(f"Error in future result: {e}")
+
+        except Exception as e:
+            print(f"\nCRITICAL ERROR in download loop: {e}", file=sys.stderr)
+            raise e
+            
         finally:
             self.shutdown()
-        
+
         self.successful_downloads = len(downloaded)
         return downloaded, failed
 
-def create_download_session(settings: Dict[str, Any], stop_event: threading.Event) -> None:
-    """Sets up and executes a PRISM download session."""
+def load_config(config_path: str) -> Dict:
+    """Loads a JSON configuration file."""
     try:
-        variable, resolution, time_step = settings['variable'], settings['resolution'], settings['time_step']
+        with open(config_path, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except (json.JSONDecodeError, FileNotFoundError, IOError) as e:
+        logging.error(f"Failed to load config file {config_path}: {e}")
+        sys.exit(1)
+
+def create_download_session(settings: Dict[str, Any], stop_event: threading.Event) -> None:
+    """Sets up and executes a PRISM download session handling both DAILY and MONTHLY intervals."""
+    is_gui_mode = settings.get('is_gui_mode', False)
+    try:
+        variables = settings['variable']
+        if isinstance(variables, str):
+            variables = [variables]
+            
+        resolution = settings['resolution']
+        time_step = settings['time_step']
+        
         start_dt = datetime.strptime(settings['start_date'], '%Y-%m-%d')
         end_dt = datetime.strptime(settings['end_date'], '%Y-%m-%d')
+
+        if time_step == 'monthly':
+            # Monthly: Format YYYYMM, Step 1 Month
+            date_fmt = '%Y%m'
+            step_delta = relativedelta(months=1)
+        else:
+            # Daily: Format YYYYMMDD, Step 1 Day
+            date_fmt = '%Y%m%d'
+            step_delta = relativedelta(days=1)
 
         potential_files = []
         current_dt = start_dt
         file_manager = FileManager(settings['output_dir'], settings['metadata_dir'], "gridflow_prism_")
         
-        base_url = "https://data.prism.oregonstate.edu"
+        base_url = "https://data.prism.oregonstate.edu/time_series/us/an"
         
         while current_dt <= end_dt:
             if stop_event.is_set(): break
+            
             year_str = current_dt.strftime('%Y')
-            date_str = current_dt.strftime('%Y%m%d')
+            date_str = current_dt.strftime(date_fmt) 
             
-            # --- Correctly format the PRISM filename and URL ---
-            resolution_label = '4kmD2' if resolution == '4km' else '800mD2'
-            filename = f"PRISM_{variable}_stable_{resolution_label}_{date_str}_bil.zip"
-            url = f"{base_url}/{time_step}/{variable}/{year_str}/{filename}"
-            
-            file_info = {
-                'url': url,
-                'output_path': file_manager.get_output_path(variable, resolution, filename),
-                'date': current_dt.strftime('%Y-%m-%d')
-            }
-            potential_files.append(file_info)
-            current_dt += relativedelta(days=1)
+            # 800m folders -> '30s' in filename
+            # 4km folders  -> '25m' in filename
+            if resolution == '800m':
+                res_path = '800m'
+                res_file_code = '30s'
+            else:
+                res_path = '4km'
+                res_file_code = '25m'
 
-        logging.info(f"Generated {len(potential_files)} potential file URLs for the specified date range.")
+            for variable in variables:
+                filename = f"prism_{variable}_us_{res_file_code}_{date_str}.zip"
+                
+                # URL Construction
+                url = f"{base_url}/{res_path}/{variable}/{time_step}/{year_str}/{filename}"
+                
+                file_info = {
+                    'url': url,
+                    'output_path': file_manager.get_output_path(variable, resolution, filename),
+                    'date': current_dt.strftime('%Y-%m-%d')
+                }
+                potential_files.append(file_info)
+            
+            current_dt += step_delta 
+
+        logging.info(f"Generated {len(potential_files)} potential file URLs.")
         if stop_event.is_set(): return
 
-        checker = AvailabilityChecker(stop_event, settings['workers'], settings['timeout'])
-        available_files = checker.find_available_files(potential_files)
+        workers = settings.get('workers', 8)
+        timeout = settings.get('timeout', 30)
+
+        checker = AvailabilityChecker(stop_event, workers, timeout)
+        available_files = checker.find_available_files(potential_files, is_gui_mode=is_gui_mode)
         
-        logging.info(f"Found {len(available_files)} available files on the server.")
-        if not available_files: sys.exit(0)
+        if not available_files:
+            logging.info("No files were found on the server for the given criteria.")
+            if not is_gui_mode: sys.exit(0)
+            return
+        
+        if HAS_UI_LIBS and not is_gui_mode:
+            from rich.console import Console
+            Console().print(f"[bold blue]Query complete![/] Found {len(available_files)} available files.")
+        else:
+            logging.info(f"Query complete! Found {len(available_files)} available files.")
+
         if stop_event.is_set(): return
 
         files_to_download = [f for f in available_files if not f['output_path'].exists()]
@@ -219,7 +339,7 @@ def create_download_session(settings: Dict[str, Any], stop_event: threading.Even
             logging.info(f"Dry run: Would attempt to download {len(files_to_download)} files.")
             return
 
-        downloader = Downloader(stop_event, settings['workers'], settings['timeout'])
+        downloader = Downloader(stop_event, workers, timeout, is_gui_mode=is_gui_mode)
         downloaded, failed = downloader.download_all(files_to_download)
 
         if stop_event.is_set(): logging.warning("Process was stopped before completion.")
@@ -234,24 +354,25 @@ def create_download_session(settings: Dict[str, Any], stop_event: threading.Even
         logging.critical(f"A critical error occurred during the session: {e}", exc_info=True)
         stop_event.set()
 
-
 def add_arguments(parser):
     """Add PRISM downloader arguments to the provided parser."""
     query_group = parser.add_argument_group('Query Parameters')
     settings_group = parser.add_argument_group('Download & Output Settings')
 
-    query_group.add_argument("--variable", choices=['ppt', 'tmin', 'tmax', 'tmean', 'tdmean', 'vpdmin', 'vpdmax'], help="Variable to download (required if not in demo mode).")
-    query_group.add_argument("--resolution", default='4km', choices=['4km', '800m'], help="Data resolution.")
-    query_group.add_argument("--time_step", default='daily', choices=['daily'], help="Time step of the data.")
-    query_group.add_argument("--start_date", help="Start date in YYYY-MM-DD format (required if not in demo mode).")
-    query_group.add_argument("--end_date", help="End date in YYYY-MM-DD format (required if not in demo mode).")
+    query_group.add_argument("-var", "--variable", nargs='+', choices=['ppt', 'tmin', 'tmax', 'tmean', 'tdmean', 'vpdmin', 'vpdmax'], help="Variable(s) to download (required if not in demo mode).")
+    query_group.add_argument("-r", "--resolution", default='4km', choices=['4km', '800m'], help="Data resolution.")
+    query_group.add_argument("-ts", "--time-step", default='daily', choices=['daily', 'monthly'], help="Time step of the data.")
+    query_group.add_argument("-sd", "--start-date", help="Start date in YYYY-MM-DD format (required if not in demo mode).")
+    query_group.add_argument("-ed", "--end-date", help="End date in YYYY-MM-DD format (required if not in demo mode).")
 
-    settings_group.add_argument("--output-dir", default="./downloads_prism", help="Directory to save downloaded files.")
-    settings_group.add_argument("--metadata-dir", default="./metadata_prism", help="Directory to save metadata files.")
-    settings_group.add_argument("--log-dir", default="./gridflow_logs", help="Directory to save log files.")
-    settings_group.add_argument("--log-level", default="verbose", choices=["minimal", "verbose", "debug"], help="Set logging verbosity for the console.")
-    settings_group.add_argument("--workers", type=int, default=8, help="Number of parallel workers for checking and downloading.")
-    settings_group.add_argument("--timeout", type=int, default=30, help="Network request timeout in seconds.")
+    query_group.add_argument("-c", "--config", help="Path to JSON config file to pre-fill arguments.")
+
+    settings_group.add_argument("-o", "--output-dir", default="./downloads_prism", help="Directory to save downloaded files.")
+    settings_group.add_argument("-md", "--metadata-dir", default="./metadata_prism", help="Directory to save metadata files.")
+    settings_group.add_argument("-ld", "--log-dir", default="./gridflow_logs", help="Directory to save log files.")
+    settings_group.add_argument("-ll", "--log-level", default="minimal", choices=["minimal", "verbose", "debug"], help="Set logging verbosity for the console.")
+    settings_group.add_argument("-w", "--workers", type=int, default=8, help="Number of parallel workers for checking and downloading.")
+    settings_group.add_argument("-t", "--timeout", type=int, default=30, help="Network request timeout in seconds.")
     settings_group.add_argument("--dry-run", action="store_true", help="Find available files but do not download them.")
     settings_group.add_argument("--demo", action="store_true", help="Run with a small, pre-defined demo query for PRISM.")
 
@@ -263,34 +384,67 @@ def main(args=None):
         add_arguments(parser)
         args = parser.parse_args()
 
-    setup_logging(args.log_dir, args.log_level, prefix="prism_downloader")
-    signal.signal(signal.SIGINT, signal_handler)
+    # FIX: Only set up logging if NOT in GUI mode
+    if not getattr(args, 'is_gui_mode', False):
+        setup_logging(args.log_dir, args.log_level, prefix="prism_downloader")
+        signal.signal(signal.SIGINT, signal_handler)
 
-    if args.demo:
-        settings = {
-            **vars(args),
-            'variable': 'tmean', 'resolution': '4km', 'time_step': 'daily',
-            'start_date': '2020-01-01', 'end_date': '2020-01-05'
-        }
-        logging.info("Running in demo mode with a pre-defined PRISM query.")
+    active_stop_event = getattr(args, 'stop_event', stop_event)
+
+    config = load_config(args.config) if args.config else {}
+    cli_args = {k: v for k, v in vars(args).items() if v is not None}
+    settings = {**config, **cli_args}
+
+    if settings.get('demo'):
+        settings.update({
+            'variable': ['tmean'], 
+            'resolution': '4km', 
+            'time_step': 'daily',
+            'start_date': '2020-01-01', 
+            'end_date': '2020-01-05'
+        })
+
+        demo_cmd = (
+            "gridflow prism "
+            "--variable tmean "
+            "--resolution 4km "
+            "--start-date 2020-01-01 "
+            "--end-date 2020-01-05"
+        )
+
+        if HAS_UI_LIBS and not getattr(args, 'is_gui_mode', False):
+            console = Console()
+            console.print(f"[bold yellow]Running in demo mode with a pre-defined PRISM query.[/]")
+            console.print(f"Demo Command:\n  [dim]{demo_cmd}[/dim]\n")
+        else:
+            logging.info(f"Running in demo mode.\nDemo Command: {demo_cmd}")
+
     else:
-        if not all([args.variable, args.start_date, args.end_date]):
-            logging.error("the following arguments are required when not in --demo mode: --variable, --start_date, --end_date")
-            sys.exit(1)
-        settings = vars(args)
+        if not all([settings.get('variable'), settings.get('start_date'), settings.get('end_date')]):
+            logging.error("The following arguments are required when not in --demo mode: --variable, --start-date, --end-date")
+            if not getattr(args, 'is_gui_mode', False):
+                sys.exit(1)
+            return
 
     try:
-        datetime.strptime(settings['start_date'], '%Y-%m-%d')
-        datetime.strptime(settings['end_date'], '%Y-%m-%d')
+        if settings.get('time_step') == 'monthly':
+             datetime.strptime(settings['start_date'], '%Y-%m-%d')
+             datetime.strptime(settings['end_date'], '%Y-%m-%d')
+        else:
+             datetime.strptime(settings['start_date'], '%Y-%m-%d')
+             datetime.strptime(settings['end_date'], '%Y-%m-%d')
     except (ValueError, TypeError):
         logging.error(f"Invalid date format. Please use YYYY-MM-DD.")
-        sys.exit(1)
+        if not getattr(args, 'is_gui_mode', False):
+            sys.exit(1)
+        return
 
-    create_download_session(settings, stop_event)
+    create_download_session(settings, active_stop_event)
     
-    if stop_event.is_set():
+    if active_stop_event.is_set():
         logging.warning("Execution was interrupted.")
-        sys.exit(130)
+        if not getattr(args, 'is_gui_mode', False):
+            sys.exit(130)
     
     logging.info("Process finished.")
 

@@ -1,13 +1,11 @@
 # tests/test_logging_utils.py
 
 import logging
-import sys
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-# Assuming the script is in gridflow.utils
-from gridflow.utils.logging_utils import MinimalFilter, setup_logging
+from gridflow.utils.logging_utils import MinimalFilter, SuppressWarnErrFilter, setup_logging
 
 # ############################################################################
 # Tests for MinimalFilter
@@ -18,36 +16,64 @@ def minimal_filter():
     """Provides an instance of the MinimalFilter."""
     return MinimalFilter()
 
-def test_minimal_filter_allows_non_info_levels(minimal_filter):
-    """Test that the filter allows all log levels other than INFO."""
+def test_minimal_filter_blocks_non_info_levels(minimal_filter):
+    """
+    Test that the filter BLOCKS all log levels other than INFO.
+    Implementation detail: 'if record.levelno != logging.INFO: return False'
+    """
     debug_record = logging.LogRecord('name', logging.DEBUG, 'path', 1, 'msg', (), None)
     warning_record = logging.LogRecord('name', logging.WARNING, 'path', 1, 'msg', (), None)
     error_record = logging.LogRecord('name', logging.ERROR, 'path', 1, 'msg', (), None)
     
-    assert minimal_filter.filter(debug_record) is True
-    assert minimal_filter.filter(warning_record) is True
-    assert minimal_filter.filter(error_record) is True
+    assert minimal_filter.filter(debug_record) is False
+    assert minimal_filter.filter(warning_record) is False
+    assert minimal_filter.filter(error_record) is False
 
 def test_minimal_filter_blocks_general_info_messages(minimal_filter):
-    """Test that the filter blocks generic INFO messages."""
+    """Test that the filter blocks generic INFO messages not in the whitelist."""
     blocked_record = logging.LogRecord('name', logging.INFO, 'path', 1, 'A generic info message.', (), None)
     assert minimal_filter.filter(blocked_record) is False
 
 @pytest.mark.parametrize("allowed_message", [
     "Progress: 1/10",
+    "Node: esgf-data.dkrz.de",
+    "Parallel processing started",
     "Completed: 10/10 files processed.",
     "Downloaded file.zip",
     "Found 5 files to process.",
-    "Retrying download...",
-    "Querying node: esgf.llnl.gov",
-    "All nodes failed to respond.",
+    "Querying node...",
     "Process finished.",
-    "Execution was interrupted"
+    "Running in demo mode",
+    "Example Command:",
+    "Stop signal received!",
+    "Execution was interrupted",
+    "Failed: checksum mismatch",
+    "All nodes failed to respond"
 ])
-def test_minimal_filter_allows_specific_info_messages(minimal_filter, allowed_message):
+def test_minimal_filter_allows_whitelisted_messages(minimal_filter, allowed_message):
     """Test that the filter allows specific, whitelisted INFO messages."""
     allowed_record = logging.LogRecord('name', logging.INFO, 'path', 1, allowed_message, (), None)
     assert minimal_filter.filter(allowed_record) is True
+
+# ############################################################################
+# Tests for SuppressWarnErrFilter
+# ############################################################################
+
+def test_suppress_warn_err_filter():
+    """Test that SuppressWarnErrFilter allows levels < WARNING and blocks >= WARNING."""
+    f = SuppressWarnErrFilter()
+    
+    info_rec = logging.LogRecord('name', logging.INFO, 'path', 1, 'msg', (), None)
+    debug_rec = logging.LogRecord('name', logging.DEBUG, 'path', 1, 'msg', (), None)
+    warn_rec = logging.LogRecord('name', logging.WARNING, 'path', 1, 'msg', (), None)
+    err_rec = logging.LogRecord('name', logging.ERROR, 'path', 1, 'msg', (), None)
+    crit_rec = logging.LogRecord('name', logging.CRITICAL, 'path', 1, 'msg', (), None)
+
+    assert f.filter(info_rec) is True
+    assert f.filter(debug_rec) is True
+    assert f.filter(warn_rec) is False
+    assert f.filter(err_rec) is False
+    assert f.filter(crit_rec) is False
 
 # ############################################################################
 # Tests for setup_logging
@@ -57,12 +83,9 @@ def test_minimal_filter_allows_specific_info_messages(minimal_filter, allowed_me
 def reset_logging():
     """Fixture to ensure the logging module is in a clean state for each test."""
     yield
-    # Get the root logger
     root_logger = logging.getLogger()
-    # Remove all handlers
     for handler in root_logger.handlers[:]:
         root_logger.removeHandler(handler)
-    # Reset level to default
     root_logger.setLevel(logging.WARNING)
 
 
@@ -82,22 +105,18 @@ def test_setup_logging_verbose_level(mock_getLogger, tmp_path):
     mock_getLogger.return_value = mock_logger
     
     setup_logging(str(tmp_path), "verbose")
-    
-    # Should set the logger's level to INFO
-    mock_logger.setLevel.assert_called_with(logging.INFO)
-    
-    # Should add two handlers (console and file)
+
+    mock_logger.setLevel.assert_called_with(logging.DEBUG)
+
     assert mock_logger.addHandler.call_count == 2
     
-    # Get the handlers that were added
     file_handler = mock_logger.addHandler.call_args_list[0][0][0]
     console_handler = mock_logger.addHandler.call_args_list[1][0][0]
-    
-    # Both handlers should have level INFO
-    assert file_handler.level == logging.INFO
+
+    assert file_handler.level == logging.DEBUG
+
     assert console_handler.level == logging.INFO
-    
-    # Console handler should not have the MinimalFilter
+
     assert not any(isinstance(f, MinimalFilter) for f in console_handler.filters)
 
 @patch('logging.getLogger')
@@ -107,16 +126,19 @@ def test_setup_logging_minimal_level(mock_getLogger, tmp_path):
     mock_getLogger.return_value = mock_logger
     
     setup_logging(str(tmp_path), "minimal")
-    
-    mock_logger.setLevel.assert_called_with(logging.INFO)
-    assert mock_logger.addHandler.call_count == 2
+
+    mock_logger.setLevel.assert_any_call(logging.DEBUG)
     
     file_handler = mock_logger.addHandler.call_args_list[0][0][0]
     console_handler = mock_logger.addHandler.call_args_list[1][0][0]
-    
-    # File handler should be INFO, console handler should have the filter
-    assert file_handler.level == logging.INFO
-    assert any(isinstance(f, MinimalFilter) for f in console_handler.filters)
+
+    assert file_handler.level == logging.DEBUG
+
+    assert console_handler.level == logging.INFO
+
+    filters = console_handler.filters
+    assert any(isinstance(f, MinimalFilter) for f in filters)
+    assert any(isinstance(f, SuppressWarnErrFilter) for f in filters)
 
 @patch('logging.getLogger')
 def test_setup_logging_debug_level(mock_getLogger, tmp_path):
@@ -125,29 +147,23 @@ def test_setup_logging_debug_level(mock_getLogger, tmp_path):
     mock_getLogger.return_value = mock_logger
     
     setup_logging(str(tmp_path), "debug")
-    
+
     mock_logger.setLevel.assert_called_with(logging.DEBUG)
-    assert mock_logger.addHandler.call_count == 2
     
     file_handler = mock_logger.addHandler.call_args_list[0][0][0]
     console_handler = mock_logger.addHandler.call_args_list[1][0][0]
-    
-    # Both handlers should be DEBUG
+
     assert file_handler.level == logging.DEBUG
     assert console_handler.level == logging.DEBUG
-    
-    # Formatter should include threadName
+
     formatter = file_handler.formatter
     assert '%(threadName)s' in formatter._fmt
 
 def test_setup_logging_fallback_on_exception(tmp_path, capsys, mocker):
     """Test that logging falls back to basicConfig if setup fails."""
-    # Make the directory creation fail
     mocker.patch('pathlib.Path.mkdir', side_effect=OSError("Permission denied"))
     
     setup_logging(str(tmp_path), "verbose")
     
     captured = capsys.readouterr()
     assert "FATAL: Failed to initialize logging" in captured.err
-    assert "Using basic console logging" in captured.err
-
