@@ -13,13 +13,22 @@ tags:
   - Python
 
 authors:
-  - name: Bhuwan Shah
-    orcid: "https://orcid.org/0000-0002-9963-6396"   
+  - name: Bhuwan P. Shah
+    orcid: 0000-0002-9963-6396
     affiliation: 1
+  - name: Ryan P. McGehee
+    orcid: 0000-0003-0464-9774
+    affiliation: 1
+  - name: Jason L. Roth
+    orcid: 0000-0003-0464-9774
+    affiliation: 2
 
 affiliations:
   - name: Iowa State University, Ames, Iowa, USA
     index: 1
+  - name: USDA Natural Resources Conservation Service (NRCS), West National Technology Support Center (WNTSC), Portland, Oregon, USA
+    index: 2
+
     
 date: 2026-01-20
 bibliography: paper.bib
