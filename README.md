@@ -451,7 +451,7 @@ GridFlow/
 │   ├── cli.py                 # CLI implementation
 │   ├── gui.py                 # GUI implementation
 │   └── __init__.py
-├── iowa_border/               # Shapefile for Iowa border
+├── conus_border/               # Shapefile for Iowa border
 ├── gridflow_logs/             # Default log directory
 ├── dist/                      # Built distributions (wheel, tar.gz, executable)
 ├── setup.py                   # Package setup
