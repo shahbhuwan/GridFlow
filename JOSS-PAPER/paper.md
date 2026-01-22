@@ -36,9 +36,9 @@ GridFlow is an open-source Python based toolkit that streamlines the complete wo
 
 GridFlow is designed to be accessible to a wide range of users through both a GUI (Figure 1) and a command-line interface (Figure 2), enabling users to reproducibly download and process climate and geospatial datasets without the need for custom scripts.
 
-![GridFlow GUI showing the unified workflow for dataset acquisition and preprocessing.](paper/figures/gridflow_gui.png)
+![GridFlow GUI showing the unified workflow for dataset acquisition and preprocessing.](JOSS-paper/gridflow_gui.png)
 
-![GridFlow CLI interface and built-in command help (`gridflow -h`).](paper/figures/gridflow_cli_help.png)
+![GridFlow CLI interface and built-in command help (`gridflow -h`).](JOSS-paper/gridflow_cli_help.png)
 
 # Statement of need
 
@@ -81,7 +81,7 @@ GridFlow also includes post-processing utilities for common climate-data prepara
 
 Figure 3 demonstrates a typical workflow in which users download global or continental-scale NetCDF datasets and then spatially subset the files to a target watershed or region using cropping or clipping.
 
-![Example of spatial subsetting using GridFlow: cropping to a bounding box and clipping to a watershed polygon.](paper/figures/gridflow_clip_crop_example.png)
+![Example of spatial subsetting using GridFlow: clipping to CONUS polygon and cropping to a bounding box.](JOSS-paper/gridflow_clip_crop_example.png)
 
 These operations are frequently required in climate impact studies, watershed-based modeling, and regional climate analyses, and GridFlow provides standardized implementations to reduce boilerplate and ensure consistent outputs.
 
@@ -99,7 +99,7 @@ Finally, GridFlow is intended to serve as an extensible “download hub” for c
 
 GridFlow is actively being expanded toward a general-purpose “downloader hub” for climate and geospatial datasets, where new sources can be added as independent modules while preserving a consistent user experience. Planned future releases will prioritize additional datasets, improved cross-platform packaging, and expanded preprocessing support. Figure 4 outlines a tentative development roadmap; timelines are subject to change depending on community feedback, available compute resources, and potential funding or sponsorship.
 
-![Tentative development roadmap for future GridFlow releases, including planned datasets and processing modules.](paper/figures/gridflow_roadmap.png)
+![Tentative development roadmap for future GridFlow releases, including planned datasets and processing modules.](JOSS-paper/gridflow_roadmap.png)
 
 # Availability
 
