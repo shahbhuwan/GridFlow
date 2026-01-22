@@ -486,9 +486,108 @@ Please include tests and update documentation as needed. Follow existing coding 
 
 ---
 
-## 📜 License
+## 💬 Support
 
-GridFlow is licensed under the **GNU Affero General Public License v3.0 (AGPLv3)**. See the `LICENSE` file for details.
+Support is focused on **GridFlow-related issues** (installation, CLI/GUI usage, download/processing modules, packaging).  
+
+For general Python environment help (conda/venv issues, compiler toolchains, GDAL/GEOS/PROJ installs), community support is best-effort—please include full logs and system details so we can help efficiently.
+
+---
+
+## 🐛 Issues & Bug Reports
+
+To report a bug, request a feature, or ask a question, please open an issue on GitHub.
+
+When reporting a problem, include:
+
+1. **Operating system** (Windows/Linux/macOS) and version  
+2. **Python version** (`python --version`)  
+3. **How GridFlow was installed** (pip / editable / exe / setup_cli.bat)  
+4. The exact **GridFlow command** you ran  
+5. Full console output (logs), and any relevant files:
+   - `failed_downloads.json` / metadata JSONs (if applicable)
+   - a sample input file or directory layout (if relevant)
+6. If applicable, your `gridflow_logs/` outputs zipped
+
+This makes it much easier to reproduce and fix issues quickly.
+
+---
+
+## 🧭 Code of Conduct
+
+Be respectful and constructive. Harassment, hostility, or abusive behavior will not be tolerated in issues, pull requests, or discussions.
+
+If a discussion becomes unproductive, maintainers may lock threads or limit participation.
+
+---
+
+## 📦 Dependencies
+
+GridFlow relies on the scientific Python ecosystem for NetCDF support, climate data workflows, and geospatial processing.
+
+### ✅ Runtime dependencies
+
+Runtime dependencies are installed via `requirements.txt` (or automatically when installing the package with `pip install .`).
+
+**Key runtime libraries include:**
+
+- **Core + downloads:** `requests`, `beautifulsoup4`, `boto3`
+- **Scientific computing:** `numpy`, `python-dateutil`
+- **NetCDF support:** `netCDF4`
+- **Geospatial stack:** `geopandas`, `shapely`, `pyproj`, `pyogrio`
+- **CLI utilities:** `rich`
+- **GUI:** `PyQt5`
+- **ERA5 via CDS API (optional):** `cdsapi`
+- **Executable building:** `pyinstaller`
+- **Image utilities:** `pillow`
+
+**Install runtime dependencies:**
+
+```bash
+pip install -r requirements.txt
+```
+
+---
+
+### 🧪 Developer / testing dependencies
+
+Developer and testing tools are installed via `requirements_dev.txt`.
+
+GridFlow uses:
+
+- `pytest`
+- `pytest-cov`
+- `pytest-qt`
+- `pytest-mock`
+
+**Recommended dev install:**
+
+```bash
+pip install -r requirements_dev.txt
+```
+
+**Recommended format for `requirements_dev.txt`:**
+
+```txt
+-r requirements.txt
+pytest
+pytest-cov
+pytest-qt
+pytest-mock
+```
+
+---
+
+### ⚠️ Platform notes (important)
+
+- **Windows users:** geospatial packages may require prebuilt wheels. If `gridflow clip` fails, ensure `pyogrio` is installed correctly and imports without errors.
+- For best compatibility, you may want to install geospatial dependencies using **conda-forge**:
+
+```bash
+conda install -c conda-forge geopandas pyogrio shapely pyproj gdal
+```
+
+- If you build the **GUI executable**, compiled geospatial dependencies (GDAL stack) must be bundled properly.
 
 ---
 
