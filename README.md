@@ -6,7 +6,6 @@
 - **License:** GNU AGPLv3  
 - **Version:** 1.0  
 - **GitHub:** `shahbhuwan/GridFlow`  
-- **Contact:** bshah@iastate.edu  
 
 ---
 
