@@ -11,7 +11,7 @@ echo ======================================================
 echo.
 
 REM --- Check if Python is installed and meets version requirements (3.10+) ---
-python -c "import sys; exit(1) if sys.version_info < (3,10) else exit(0)" >nul 2>&1
+python -c "import sys; exit(1) if not ((3,10) <= sys.version_info < (3,13)) else exit(0)" >nul 2>&1
 
 if %errorlevel% neq 0 (
     echo.

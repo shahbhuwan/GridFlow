@@ -219,7 +219,7 @@ gridflow cmip5 --demo
 
 ## 3. ERA5 Downloader (AWS Open Data)
 
-Fetch ERA5(-Land) climate reanalysis data **directly from AWS S3** (no CDS API key required). fileciteturn3file5
+Fetch ERA5 climate reanalysis data **directly from AWS S3** (no CDS API key required). fileciteturn3file5
 
 ### **Command**
 ```bash
