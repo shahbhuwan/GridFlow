@@ -7,6 +7,32 @@
 - **Version:** 1.0  
 - **GitHub:** `shahbhuwan/GridFlow`  
 
+## 🧭 Quick Navigation
+
+- [📖 Statement of Need](#-statement-of-need)
+- [🚀 Installation](#-installation)
+  - [Option 1: Standalone GUI](#option-1-standalone-gui-no-install-required)
+  - [Option 2: CLI Wrapper (Windows Batch)](#option-2-cli-wrapper-windows-batch)
+  - [Option 3: Developer Setup (Pip)](#option-3-developer-setup-pip)
+- [🧪 Developer & Testing Setup](#-developer--testing-setup)
+- [✅ CLI Usage](#-cli-usage)
+- [🛠️ Data Download Modules](#-data-download-modules)
+  - [1. CMIP6 Downloader (ESGF)](#1-cmip6-downloader-esgf)
+  - [2. CMIP5 Downloader (ESGF)](#2-cmip5-downloader-esgf)
+  - [3. ERA5 Downloader (AWS Open Data)](#3-era5-downloader-aws-open-data)
+  - [4. PRISM Downloader (USA, High Resolution)](#4-prism-downloader-usa-high-resolution)
+  - [5. DEM Downloader (AWS Open Data)](#5-dem-downloader-aws-open-data)
+- [⚙️ Processing Modules](#-processing-modules)
+  - [📋 Catalog Generator](#-catalog-generator)
+  - [✂️ Spatial Operations](#️-spatial-operations)
+  - [⏳ Temporal & Unit Operations](#-temporal--unit-operations)
+- [📂 Directory Structure](#-directory-structure)
+- [🤝 Contributing](#-contributing)
+- [💬 Support](#-support)
+- [🐛 Issues & Bug Reports](#-issues--bug-reports)
+- [🧭 Code of Conduct](#-code-of-conduct)
+- [📦 Dependencies](#-dependencies)
+- [🙏 Acknowledgments](#-acknowledgments)
 ---
 
 ## 📖 Statement of Need
@@ -28,12 +54,18 @@ In the era of big data, acquiring climate data remains a significant bottleneck 
 
 ## 🚀 Installation
 
+**Jump to:**
+- [Standalone GUI](#option-1-standalone-gui-no-install-required)
+- [CLI Wrapper](#option-2-cli-wrapper-windows-batch)
+- [Developer Setup](#option-3-developer-setup-pip)
+
+
 GridFlow is designed for portability. You do not need to be a Python expert to use it.
 
 ### Option 1: Standalone GUI (No Install Required)
 ✅ **Simplest method**: No Python installation needed.
 
-1. Download the `GridFlow_GUI.exe` from the **Releases** page.
+1. Download the GUI executable here: **[GridFlow.exe (v1.0.0)](https://github.com/shahbhuwan/GridFlow/releases/download/v1.0.0/GridFlow.exe)**
 2. Double-click the `.exe` to launch the application.
 
 ---
@@ -112,6 +144,8 @@ gridflow <command> -h
 ```
 
 ---
+
+⬆️ [Back to top](#-quick-navigation)
 
 ## 🛠️ Data Download Modules
 
@@ -324,6 +358,8 @@ GridFlow includes tools to prepare raw data for immediate analysis.
 
 ---
 
+⬆️ [Back to top](#-quick-navigation)
+
 ## 📋 Catalog Generator
 
 Scans a directory of downloaded NetCDF files and generates a `catalog.json` summarizing metadata. fileciteturn2file5
@@ -486,6 +522,8 @@ Please include tests and update documentation as needed. Follow existing coding 
 
 ---
 
+⬆️ [Back to top](#-quick-navigation)
+
 ## 💬 Support
 
 Support is focused on **GridFlow-related issues** (installation, CLI/GUI usage, download/processing modules, packaging).  
@@ -595,3 +633,5 @@ conda install -c conda-forge geopandas pyogrio shapely pyproj gdal
 
 - **Open-Source Community:** for libraries like PyQt5, netCDF4, geopandas, rich, tqdm, and boto3  
 - **Data Providers:** PRISM, OpenTopography, ESGF, and CDS for climate and geospatial data
+
+⬆️ [Back to top](#-quick-navigation)
