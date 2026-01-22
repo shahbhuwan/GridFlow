@@ -344,8 +344,15 @@ class WorkerThread(QThread):
         try:
             self.args.stop_event = self.stop_event
             self.args.stop_flag = self.stop_event.is_set
+
             self.command_func(self.args)
-            self.task_completed.emit(True)
+
+            # If we were asked to stop, don’t claim "completed successfully"
+            if self.stop_event.is_set() or self.is_stopping:
+                self.task_completed.emit(False)
+            else:
+                self.task_completed.emit(True)
+
         except Exception as exc:
             self.error_occurred.emit(f"{type(exc).__name__}: {exc}")
             self.task_completed.emit(False)
@@ -860,7 +867,8 @@ class GridFlowGUI(QMainWindow):
                 ck.setObjectName("largeCheckbox")
             self.form_layout.addRow(mk_label(label, indent=indent), ck)
             self.arg_widgets[label.lower().replace(" ", "_")] = ck
-
+            return ck
+        
         def add_combo(label, opts, default="", tip="", indent=0, required=False):
             cb = QComboBox()
             cb.addItems(opts)
@@ -870,6 +878,65 @@ class GridFlowGUI(QMainWindow):
             self.form_layout.addRow(mk_label(label, indent=indent, required=required), cb)
             self.arg_widgets[label.lower().replace(" ", "_")] = cb
             return cb 
+        
+        def apply_demo_defaults_for_current_form():
+            src_now = self.src_combo.currentText()
+            proc_now = self.proc_combo.currentText()
+
+            # Only demo-fill Download forms (adjust if you want Crop/Clip/etc too)
+            if proc_now != "Download":
+                return
+
+            if src_now == "PRISM":
+                self.arg_widgets["variable"].setCurrentText("tmean")
+                self.arg_widgets["resolution"].setCurrentText("4km")
+                self.arg_widgets["time_step"].setCurrentText("daily")
+                self.arg_widgets["start_date"].setText("2020-01-01")
+                self.arg_widgets["end_date"].setText("2020-01-05")
+                self.arg_widgets["output_dir"].setText("./downloads_prism")
+                self.arg_widgets["metadata_dir"].setText("./metadata_prism")
+                self.arg_widgets["log_dir"].setText("./gridflow_logs")
+
+            elif src_now == "DEM":
+                # Small-ish example (Iowa-ish) so it won’t explode in size
+                self.arg_widgets["bounds"].setText("43.5 40.3 -91.1 -96.7")
+                self.arg_widgets["dem_type"].setCurrentText("COP30")
+                self.arg_widgets["output_dir"].setText("./downloads_dem")
+                self.arg_widgets["metadata_dir"].setText("./metadata_dem")
+                self.arg_widgets["log_dir"].setText("./gridflow_logs")
+
+            elif src_now == "ERA5":
+                self.arg_widgets["start_date"].setText("2021-01-01")
+                self.arg_widgets["end_date"].setText("2021-03-31")
+                # variables is a QComboBox in your code
+                self.arg_widgets["variables"].setCurrentText("t2m")
+                self.arg_widgets["aoi"].setCurrentText("corn_belt")
+                self.arg_widgets["output_dir"].setText("./downloads_era5")
+                self.arg_widgets["metadata_dir"].setText("./metadata_era5")
+                self.arg_widgets["log_dir"].setText("./gridflow_logs")
+
+            elif src_now == "CMIP6":
+                self.arg_widgets["project"].setCurrentText("CMIP6")
+                self.arg_widgets["activity"].setCurrentText("ScenarioMIP")
+                self.arg_widgets["variable"].setCurrentText("tas")
+                self.arg_widgets["experiment"].setCurrentText("ssp245")
+                self.arg_widgets["model"].setCurrentText("MPI-ESM1-2-LR")
+                self.arg_widgets["frequency"].setCurrentText("day")
+                self.arg_widgets["resolution"].setText("250 km")
+                self.arg_widgets["output_dir"].setText("./downloads_cmip6")
+                self.arg_widgets["metadata_dir"].setText("./metadata_cmip6")
+                self.arg_widgets["log_dir"].setText("./gridflow_logs")
+
+            elif src_now == "CMIP5":
+                self.arg_widgets["project"].setCurrentText("CMIP5")
+                self.arg_widgets["variable"].setCurrentText("tas")
+                self.arg_widgets["model"].setCurrentText("CanESM2")
+                self.arg_widgets["experiment"].setCurrentText("historical")
+                self.arg_widgets["frequency"].setCurrentText("mon")
+                self.arg_widgets["output_dir"].setText("./downloads_cmip5")
+                self.arg_widgets["metadata_dir"].setText("./metadata_cmip5")
+                self.arg_widgets["log_dir"].setText("./gridflow_logs")
+
 
         indent_amount = 0
 
@@ -904,7 +971,8 @@ class GridFlowGUI(QMainWindow):
                 add_file("Log Dir", "./gridflow_logs", "Directory for log files.", dir_=True, indent=indent_amount, required=True)
                 add_combo("Save Mode", ["structured", "flat"], "structured", "File organization mode.", indent=indent_amount)
                 add_chk("Latest", True, "Download only the latest version of files.", indent=indent_amount)
-                add_chk("Demo", is_first_run(), "Run in demo mode with predefined settings.", indent=indent_amount)
+                demo_ck = add_chk("Demo", is_first_run(), "Fill the form with demo defaults.", indent=indent_amount)
+                demo_ck.toggled.connect(lambda on: apply_demo_defaults_for_current_form() if on else None)
 
                 if skill_level == "Advanced":
                     add_line("Institution", "", "Institution responsible for the model.", indent=indent_amount, vocab=self.cmip6_institution_id)
@@ -1021,7 +1089,8 @@ class GridFlowGUI(QMainWindow):
                 add_file("Metadata Dir", "./metadata_era5", "Directory for metadata JSON files.", dir_=True, indent=indent_amount, required=True)
                 
                 add_file("Log Dir", "./gridflow_logs", "Directory for log files.", dir_=True, indent=indent_amount, required=True)
-                add_chk("Demo", is_first_run(), "Run in demo mode with predefined settings.", indent=indent_amount)
+                demo_ck = add_chk("Demo", is_first_run(), "Fill the form with demo defaults.", indent=indent_amount)
+                demo_ck.toggled.connect(lambda on: apply_demo_defaults_for_current_form() if on else None)
 
             elif src == "PRISM":
                 add_combo("Variable", ["ppt", "tmax", "tmin", "tmean", "tdmean", "vpdmin", "vpdmax"], "tmean", "PRISM climate variable.", indent=indent_amount, required=True)
@@ -1034,15 +1103,30 @@ class GridFlowGUI(QMainWindow):
                 add_file("Log Dir", "./gridflow_logs", "Directory for log files.", dir_=True, indent=indent_amount, required=True)
                 add_line("Retries", "3", "Number of download retries.", indent=indent_amount)
                 add_line("Timeout", "30", "HTTP timeout in seconds.", indent=indent_amount)
-                add_chk("Demo", is_first_run(), "Run in demo mode with predefined settings.", indent=indent_amount)
+                demo_ck = add_chk("Demo", is_first_run(), "Fill the form with demo defaults.", indent=indent_amount)
+                demo_ck.toggled.connect(lambda on: apply_demo_defaults_for_current_form() if on else None)
 
             elif src == "DEM":
-                add_line("Bounds", "43.5 40.3 -91.1 -92.9", "N S E W (degrees). Space separated.", indent=indent_amount, required=True)
-                add_combo("DEM Type", ["COP30", "USGS10m"], "COP30", "Source: COP30 (Global 30m) or USGS10m (US 10m).", indent=indent_amount, required=True)
-                add_file("Output Dir", "./downloads_dem", "Directory for downloaded DEM tiles.", dir_=True, indent=indent_amount, required=True)
-                add_file("Metadata Dir", "./metadata_dem", "Directory for metadata JSON files.", dir_=True, indent=indent_amount, required=True)
+                bounds_edit = add_line(
+                    "Bounds",
+                    "43.5 40.3 -91.1 -92.9",
+                    "Enter bounding box as: NORTH SOUTH EAST WEST (space-separated). Example: 43.5 40.3 -91.1 -92.9",
+                    indent=indent_amount,
+                    required=True
+                )
+
+                # Visible “background” hint inside the input
+                bounds_edit.setPlaceholderText("N S E W  (e.g., 43.5 40.3 -91.1 -92.9)")
+                bounds_edit.setToolTip("Bounds format: NORTH SOUTH EAST WEST (degrees). Example: 43.5 40.3 -91.1 -92.9")
+
+                add_combo("DEM Type", ["COP30", "USGS10m"], "COP30", "COP30 = global; USGS10m = USA-only.", indent=indent_amount)
+
+                add_file("Output Dir", "./downloads_dem", "Directory for DEM tiles.", dir_=True, indent=indent_amount, required=True)
+                add_file("Metadata Dir", "./metadata_dem", "Directory for DEM metadata.", dir_=True, indent=indent_amount, required=True)
                 add_file("Log Dir", "./gridflow_logs", "Directory for log files.", dir_=True, indent=indent_amount, required=True)
-                add_chk("Demo", is_first_run(), "Run in demo mode with predefined settings.", indent=indent_amount)
+
+                demo_ck = add_chk("Demo", is_first_run(), "Fill the form with demo defaults.", indent=indent_amount)
+                demo_ck.toggled.connect(lambda on: apply_demo_defaults_for_current_form() if on else None)
 
         elif process == "Crop":
             add_file("Input Dir", "./downloads_cmip6", "Directory containing NetCDF files to crop.", dir_=True, indent=indent_amount, required=True)
@@ -1277,7 +1361,47 @@ class GridFlowGUI(QMainWindow):
                     self.log_text.append(f"❗ {field.replace('_', ' ').title()} is required for Catalog")
                     return
 
-        args_dict["workers"] = int(self.workers_edit.text().strip()) if self.workers_edit.text().strip() else 4
+        # --- GUI Safety Warnings (Workers + Large DEM Downloads) ---
+        workers_val = int(self.workers_edit.text().strip()) if self.workers_edit.text().strip() else 4
+
+        if workers_val >= 32:
+            resp = QMessageBox.warning(
+                self, "High Workers Warning",
+                f"You selected {workers_val} workers.\n\n"
+                "⚠️ Too many workers can:\n"
+                "• overwhelm your internet bandwidth\n"
+                "• trigger server rate-limits\n"
+                "• cause failed/partial downloads\n\n"
+                "✅ Tip: choose workers based on your internet speed.\n"
+                "Start with 4–16 and increase only if stable.\n\n"
+                "Continue anyway?",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No
+            )
+            if resp == QMessageBox.No:
+                return
+
+        # Warning for DEM when bounds look extremely large (world/continent scale)
+        if src == "DEM" and proc == "Download" and args_dict.get("bounds"):
+            try:
+                b = args_dict["bounds"]
+                north, south, east, west = map(float, b)
+                lat_span = abs(north - south)
+                lon_span = abs(east - west)
+
+                if lat_span >= 30 or lon_span >= 30:
+                    resp = QMessageBox.warning(
+                        self, "Large DEM Request Warning",
+                        "⚠️ Your DEM bounds cover a very large area.\n\n"
+                        "Downloading continent/world-scale DEM tiles can be extremely large\n"
+                        "(many GBs) and may take a long time.\n\n"
+                        "Continue anyway?",
+                        QMessageBox.Yes | QMessageBox.No, QMessageBox.No
+                    )
+                    if resp == QMessageBox.No:
+                        return
+            except Exception:
+                pass
+
         args_dict["log_level"] = self.verbosity_combo.currentText()
         args_dict["config"] = None
         args_dict["test"] = False
@@ -1355,32 +1479,82 @@ class GridFlowGUI(QMainWindow):
         self.log_text.append(f"▶ Starting {src} — {proc} …")
 
     def stop_task(self) -> None:
-        if self.worker_thread and self.worker_thread.isRunning():
-            resp = QMessageBox.question(
-                self, "Confirm Stop",
-                "Are you sure you want to stop the current task?",
-                QMessageBox.Yes | QMessageBox.No, QMessageBox.No
-            )
-            if resp == QMessageBox.Yes:
-                self.worker_thread.stop(force=False)
-                self.log_text.append("⏹ Stopping task …")
-                self.stop_btn.setText("Force Stop")
-        else:
+        """
+        Stop button behavior:
+        - If a task is running:
+            * First click -> confirm -> request graceful stop
+            * Button changes to "Force Stop"
+        - If already stopping:
+            * Click -> force stop immediately
+        """
+        if not self.worker_thread or not self.worker_thread.isRunning():
             self.log_text.append("❗ No task is running")
+            self.start_btn.setEnabled(True)
+            self.stop_btn.setEnabled(False)
+            self.stop_btn.setText("Stop")
+            return
+
+        # If we already requested a stop, this click becomes "Force Stop"
+        if getattr(self.worker_thread, "is_stopping", False):
+            self.log_text.append("⚠ Force stopping task …")
+            self.stop_btn.setEnabled(False)  # prevent repeated force clicks
+            try:
+                self.worker_thread.stop(force=True)
+            except Exception as e:
+                self.log_text.append(f"❌ Force stop failed: {e}")
+            return
+
+        # First stop request (graceful)
+        resp = QMessageBox.question(
+            self, "Confirm Stop",
+            "Are you sure you want to stop the current task?",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No
+        )
+        if resp != QMessageBox.Yes:
+            return
+
+        self.log_text.append("⏹ Stopping task …")
+        self.stop_btn.setText("Force Stop")
+        self.stop_btn.setEnabled(True)   # keep enabled so user can force stop if needed
+        self.start_btn.setEnabled(False) # don't allow starting a new task mid-stop
+
+        try:
+            self.worker_thread.stop(force=False)
+        except Exception as e:
+            self.log_text.append(f"❌ Stop request failed: {e}")
+            # Restore UI to safe state
             self.start_btn.setEnabled(True)
             self.stop_btn.setEnabled(False)
             self.stop_btn.setText("Stop")
 
     def on_task_stopped(self):
+        """
+        Called when the worker thread reports it has stopped.
+        Resets UI state and updates Advanced command display.
+        """
         self.log_text.append("✅ Task stopped")
         self.start_btn.setEnabled(True)
         self.stop_btn.setEnabled(False)
         self.stop_btn.setText("Stop")
         self.progress_bar.setValue(0)
+
+        # Only show command box in Advanced mode
         if self.skill_combo.currentText() == "Advanced":
-            current_text = self.command_display.text()
-            self.command_display.setText(current_text.replace("Running:", "Stopped:"))
-            self.command_display.setStyleSheet("font-size: 12pt; font-weight: bold; color: #ffffff; background: #fd7e14; padding: 8px; border-radius: 4px; border: none;")
+            current_text = self.command_display.toPlainText().strip()
+
+            # Replace the label if it exists (be tolerant)
+            if "Running:" in current_text:
+                updated = current_text.replace("Running:", "Stopped:")
+            elif current_text:
+                updated = "Stopped:\n" + current_text
+            else:
+                updated = "Stopped."
+
+            self.command_display.setText(updated)
+            self.command_display.setStyleSheet(
+                "font-size: 12pt; font-weight: bold; color: #ffffff; "
+                "background: #fd7e14; padding: 8px; border-radius: 4px; border: none;"
+            )
             self.command_display.setVisible(True)
             self.copy_button.setVisible(True)
         else:
