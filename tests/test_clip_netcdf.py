@@ -322,10 +322,18 @@ def test_main_demo(mock_args, mock_logging, mock_session, caplog, mocker):
 @patch('argparse.ArgumentParser.parse_args')
 def test_main_missing_args(mock_args, mock_logging, caplog):
     caplog.set_level(logging.ERROR)
-    # Missing input/output/shapefile
-    mock_ns = MagicMock(demo=False, config=None, input_dir=None, is_gui_mode=False)
+
+    mock_ns = MagicMock(
+        demo=False,
+        config=None,
+        input_dir=None,
+        output_dir=None,
+        shapefile=None,
+        is_gui_mode=False
+    )
     mock_args.return_value = mock_ns
-    
+
     with pytest.raises(SystemExit):
         main()
-    assert "Missing required arguments" in caplog.text
+
+    assert "No shapefile selected" in caplog.text

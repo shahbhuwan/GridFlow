@@ -100,7 +100,8 @@ class Clipper:
         """Loads and prepares the shapefile geometry."""
         shapefile_path = Path(self.settings['shapefile'])
         if not shapefile_path.is_file():
-            logging.error(f"Shapefile not found: {shapefile_path}")
+            if not self.settings.get("is_gui_mode", False):
+                logging.error(f"Shapefile not found: {shapefile_path}")
             return False
 
         try:
@@ -266,50 +267,61 @@ def load_config(config_path: str) -> Dict:
         logging.error(f"Failed to load config file: {e}")
         return {}
 
+
 def create_clipping_session(settings: Dict[str, Any], stop_event: threading.Event) -> None:
     is_gui_mode = settings.get('is_gui_mode', False)
-    
+
     try:
         if not all([settings.get('input_dir'), settings.get('output_dir'), settings.get('shapefile')]):
-            logging.error("Missing required arguments: input_dir, output_dir, shapefile.")
-            if not is_gui_mode: sys.exit(1)
-            return
+            if not settings.get("shapefile"):
+                msg = "No shapefile selected. Please choose a .shp file."
+            else:
+                msg = "Missing required arguments: input_dir, output_dir, shapefile."
+
+            logging.error(msg)
+            if is_gui_mode:
+                raise ValueError(msg)
+            sys.exit(1)
 
         file_manager = FileManager(settings['input_dir'], settings['output_dir'])
         nc_files = file_manager.get_netcdf_files()
-        
+
         if not nc_files:
             logging.warning(f"No NetCDF files found in {settings['input_dir']}")
-            if not is_gui_mode: sys.exit(0)
+            if not is_gui_mode:
+                sys.exit(0)
             return
 
-        # Clean settings to remove duplicate object
         settings.pop('stop_event', None)
         settings.pop('stop_flag', None)
 
         clipper = Clipper(file_manager, stop_event, **settings)
-        
-        if HAS_UI_LIBS and not is_gui_mode:
-            with Console().status("[bold green]Loading shapefile...", spinner="dots"):
-                loaded = clipper.load_shapefile()
-        else:
-            loaded = clipper.load_shapefile()
+
+        loaded = clipper.load_shapefile()
 
         if not loaded:
-            if not is_gui_mode: sys.exit(1)
-            return
+            shp = settings.get("shapefile")
+            if is_gui_mode:
+                raise FileNotFoundError(f"Shapefile not found: {Path(shp)}")
+            sys.exit(1)
 
-        logging.info(f"Starting clipping for {len(nc_files)} files...")
+        logging.info(f"Starting clipping for {len(nc_files)} files.")
         success_count, total_count = clipper.process_all(nc_files)
-        
+
         if stop_event.is_set():
             logging.warning("Process was stopped before completion.")
-        
+
         logging.info(f"Completed: {success_count}/{total_count} files processed successfully.")
 
     except Exception as e:
-        logging.critical(f"A critical error occurred: {e}", exc_info=True)
         stop_event.set()
+
+        if is_gui_mode:
+            raise
+
+        logging.critical(f"A critical error occurred: {e}", exc_info=True)
+        sys.exit(1)
+ 
 
 def add_arguments(parser):
     io_group = parser.add_argument_group('Input and Output')

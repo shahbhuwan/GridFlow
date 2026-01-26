@@ -298,7 +298,6 @@ ABOUT_DIALOG_HTML = (
     "<p>Copyright © 2025 Bhuwan Shah<br>"
     "Released under the AGPL-v3 licence.</p>"
     "<p><b>GitHub:</b> <a href='https://github.com/shahbhuwan'>https://github.com/shahbhuwan/GridFlow</a><br>"
-    "<b>Email:</b> <a href='mailto:bshah@iastate.edu'>bshah@iastate.edu</a></p>"
 )
 
 LABEL_COL = 120
@@ -354,7 +353,8 @@ class WorkerThread(QThread):
                 self.task_completed.emit(True)
 
         except Exception as exc:
-            self.error_occurred.emit(f"{type(exc).__name__}: {exc}")
+            msg = str(exc).strip() or "Task failed."
+            self.error_occurred.emit(msg)
             self.task_completed.emit(False)
         finally:
             if self.is_stopping:
@@ -385,10 +385,13 @@ class QtHandler(logging.Handler):
         self.progress_signal = progress_signal
         self.minimal_mode = True  
 
-        # FIX: Added 'Query complete' and 'A critical' to regex so errors/status aren't hidden
         self.minimal_filter_regex = re.compile(
-            r"^(Progress:|Completed:|Downloaded|Found |Querying|Query complete|Running|Parallel|All nodes failed|Process finished|Execution was interrupted|Connection timed out|No available files|Failed|Error|Critical|Exception|A critical|Clipped|Cropped|Converted|Aggregated)"
-            )
+            r"^(Progress:|Completed:|Downloaded|Found |Querying|Query complete|Running|Parallel|All nodes failed|"
+            r"Process finished|Execution was interrupted|Connection timed out|No available files|"
+            r"Failed|Error|Critical|Exception|A critical|"
+            r"Shapefile|Missing required|"
+            r"Clipped|Cropped|Converted|Aggregated)"
+        )
 
         self.progress_regex = re.compile(r"Progress: (\d+)/(\d+)|Completed: (\d+)/(\d+)")
         self.retry_warning_regex = re.compile(r"Retrying \(Retry\(total=(\d+),")
