@@ -2,14 +2,20 @@
 title: 'GridFlow: A modular high-performance toolkit for downloading and processing large-scale climate and geospatial datasets'
 
 tags:
-  - climate data
-  - CMIP6
+  - downloader
+  - processor
+  - GridFlow
   - CMIP5
+  - CMIP6
+  - CMIP7
   - ERA5
   - PRISM
+  - DEM
   - NetCDF
   - geospatial
+  - climate
   - hydrology
+  - grided datasets
   - Python
 
 authors:
@@ -32,7 +38,7 @@ bibliography: paper.bib
 
 Climate and geospatial research increasingly relies on large observational and model-derived datasets such as CMIP6, CMIP5, ERA5 reanalysis, PRISM climate records, and global digital elevation models (DEMs). While these resources are widely available through web portals and distributed archives, acquiring and preparing them for analysis remains a major bottleneck. Researchers frequently spend considerable time navigating search interfaces, handling authentication requirements, writing brittle download scripts, and performing repetitive post-processing steps such as cropping, clipping, unit conversion, and temporal aggregation.
 
-GridFlow is an open-source Python based toolkit that streamlines the complete workflow of climate and geospatial data preparation. It provides both a command-line interface (CLI) and a graphical user interface (GUI) to download major climate products and to process NetCDF datasets into analysis-ready subsets. GridFlow emphasizes modular design, parallel execution, and usability to support a broad user community, including researchers, students, and practitioners who need reliable access to large datasets without extensive custom scripting.
+``GridFlow`` is an open-source Python based toolkit that streamlines the complete workflow of climate and geospatial data preparation. It provides both a command-line interface (CLI) and a graphical user interface (GUI) to download major climate products and to process NetCDF datasets into analysis-ready subsets. GridFlow emphasizes modular design, parallel execution, and usability to support a broad user community, including researchers, students, and practitioners who need reliable access to large datasets without extensive custom scripting.
 
 GridFlow is designed to be accessible to a wide range of users through both a GUI (Figure 1) and a command-line interface (Figure 2), enabling users to reproducibly download and process climate and geospatial datasets without the need for custom scripts.
 
@@ -58,7 +64,7 @@ GridFlow provides dedicated download modules for:
 
 - **CMIP6 climate model data** via ESGF search and retrieval
 - **CMIP5 climate model data** via ESGF search and retrieval
-- **ERA5-Land reanalysis data** accessed directly from cloud-hosted sources
+- **ERA5 reanalysis data** accessed directly from cloud-hosted sources
 - **PRISM historical climate datasets** for the contiguous United States
 - **Digital Elevation Models (DEM)** including global (Copernicus) and US-focused DEM products
 
@@ -106,10 +112,12 @@ GridFlow is actively being expanded toward a general-purpose â€œdownloader hubâ€
 
 # Availability
 
-GridFlow is released under the GNU Affero General Public License v3.0 (AGPLv3) and is available on GitHub at:
+GridFlow (version 1.0) is released under the GNU Affero General Public License v3.0 (AGPLv3) and is available on GitHub at:
 
 https://github.com/shahbhuwan/GridFlow
 
 # Acknowledgements
 
 The authors thank the open-source scientific Python community for foundational libraries that enable GridFlow's functionality, including Xarray, GeoPandas, and the broader NetCDF and geospatial ecosystem. The authors also acknowledge the data providers and maintainers of ESGF, PRISM Climate Group, ECMWF (ERA5), Copernicus DEM, and USGS datasets for making large-scale climate and geospatial resources publicly accessible.
+
+This work was supported by the U.S. Department of Agriculture (USDA) Natural Resources Conservation Service (NRCS) under Cooperative Agreement No. NR243A750008C001.

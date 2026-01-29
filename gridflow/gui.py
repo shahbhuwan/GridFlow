@@ -390,6 +390,7 @@ class QtHandler(logging.Handler):
             r"Process finished|Execution was interrupted|Connection timed out|No available files|"
             r"Failed|Error|Critical|Exception|A critical|"
             r"Shapefile|Missing required|"
+            r"Invalid bounds|Bounds|"
             r"Clipped|Cropped|Converted|Aggregated)"
         )
 
