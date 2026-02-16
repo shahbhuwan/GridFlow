@@ -15,7 +15,7 @@ tags:
   - geospatial
   - climate
   - hydrology
-  - grided datasets
+  - gridded datasets
   - Python
 
 authors:
@@ -30,7 +30,7 @@ affiliations:
   - name: Iowa State University, Ames, Iowa, USA
     index: 1
 
-date: 2026-01-20
+date: 2026-02-16
 bibliography: paper.bib
 ---
 
@@ -54,9 +54,11 @@ In many applied workflows (e.g., hydrology, water resources, agriculture, and la
 
 GridFlow addresses this gap by offering a single, consistent interface for acquiring and preparing multiple widely used climate and geospatial datasets. The toolkit couples high-level download modules with post-processing utilities to produce analysis-ready NetCDF outputs and metadata summaries, enabling rapid adoption in research and educational contexts.
 
-# Functionality and design
+# Software design
 
-GridFlow is designed as a modular toolkit with two primary capability groups: (1) data downloading modules and (2) processing modules.
+GridFlow’s architecture was driven by the need to balance scalability for large, distributed datasets with accessibility for interdisciplinary researchers who may lack advanced software engineering backgrounds. A primary design trade-off was choosing between a purely programmatic API versus a coupled Command-Line Interface (CLI) and Graphical User Interface (GUI). We opted to implement both, driven by a unified JSON configuration backend. The GUI lowers the barrier to entry for students and domain scientists, while the CLI allows for seamless integration into High-Performance Computing (HPC) environments and automated job schedulers.
+
+GridFlow is organized into two primary capability groups: (1) data downloading modules and (2) processing modules.
 
 ## Downloading modules
 
@@ -89,26 +91,44 @@ Figure 3 demonstrates a typical workflow in which users download global or conti
 
 ![Example of spatial subsetting using GridFlow: clipping to CONUS polygon and cropping to a bounding box.](gridflow_clip_crop_example.png)
 
-These operations are frequently required in climate impact studies, watershed-based modeling, and regional climate analyses, and GridFlow provides standardized implementations to reduce boilerplate and ensure consistent outputs.
+These operations are frequently required in climate impact studies, watershed-based modeling, and regional climate analyses. To handle the inherent instability of remote data portals (e.g., ESGF node timeouts or rate limits), GridFlow implements a robust asynchronous download manager with built-in retry logic and checksum validation. Furthermore, rather than reinventing array operations, the processing modules act as standardized, memory-safe wrappers around `Xarray` [@xarray] and `GeoPandas` [@geopandas]. This design choice ensures that complex operations are executed efficiently without requiring the user to write and maintain boilerplate code. Ultimately, GridFlow's configuration-driven design ensures that every step is explicitly documented and fully reproducible.
 
-# Related work
+# State of the field
 
-GridFlow addresses a recurring challenge in climate and geospatial workflows: while many high-value datasets are publicly available, the end-to-end process of discovering, downloading, organizing, and preparing them for analysis remains fragmented across portals, archive-specific clients, and custom scripts. Users often combine multiple utilities for data acquisition (e.g., web portals or API clients) with separate tools for preprocessing (e.g., cropping, clipping, aggregation), which can reduce reproducibility and increase maintenance effort.
+GridFlow addresses a recurring challenge in climate and geospatial workflows: while many high-value datasets are publicly available, the end-to-end process of discovering, downloading, organizing, and preparing them for analysis remains fragmented across portals, archive-specific clients, and custom scripts. For example, specialized tools like `weathercan` [@LaZerte2018] provide excellent, streamlined access to specific national repositories (such as Environment and Climate Change Canada), but researchers requiring multi-source inputs must still weave together several disparate APIs and packages. Users often combine these independent utilities for data acquisition with separate tools for preprocessing (e.g., cropping, clipping, aggregation), which ultimately reduces reproducibility and increases maintenance effort.
 
-GridFlow complements downstream climate analytics libraries such as xclim [@xclim] and xCDAT [@xcdat], which focus on derived indicators and analysis once data are already available locally or in a cloud-native format. In contrast, GridFlow focuses on the upstream bottleneck: scalable acquisition and standardized preprocessing of large gridded datasets. By providing consistent commands for both downloading and processing, GridFlow helps users move from raw archives to analysis-ready outputs without assembling a bespoke pipeline for each data source.
+While the Python ecosystem offers robust downstream climate analytics libraries such as `xclim` [@Bourgault2023] and `xCDAT` [@Vo2024], alongside comprehensive NetCDF post-processing packages like `nctoolkit` [@Wilson2023], these tools inherently assume the data is already locally available or in a standardized format. Specifically, `xclim` facilitates the computation of climate indicators and statistical adjustments, and `xCDAT` streamlines common analysis operations like spatial and temporal averaging on existing xarray objects. Similarly, `nctoolkit` provides an intuitive interface for tasks like regridding and subsetting built on top of the Climate Data Operators (CDO) library. GridFlow instead focuses on the upstream bottleneck: the scalable acquisition and standardized preprocessing of large gridded datasets, seamlessly bridging the gap between raw archives and analysis-ready formats.
 
-Several ecosystem tools support accessing climate archives through cloud-native workflows and metadata catalogs, including Pangeo-based stacks and dataset indexing approaches. For example, intake-esm [@intake-esm] enables discovery and loading of CMIP-style collections through structured catalogs, and xarray-based tooling enables flexible analysis once datasets are opened. These approaches are powerful, but they typically assume that users already operate within specific cloud or catalog ecosystems and do not aim to provide a unified, user-facing pipeline for bulk downloading and local preparation across heterogeneous sources.
+Several excellent tools support accessing climate archives through cloud-native workflows and metadata catalogs. For example, `intake-esm` [@intakeesm] enables the discovery and loading of CMIP-style collections through structured catalogs. Frameworks like `SlideRule` [@Shean2023] offer rapid, scalable on-demand processing in the cloud, returning high-level point cloud products directly to the user. However, these approaches typically assume users already operate within specific cloud ecosystems or target specific satellite missions, and do not provide a unified, user-facing pipeline for bulk downloading and local preparation across heterogeneous, non-cloud-optimized repositories.
 
-GridFlow also relates to interactive GIS software such as QGIS, which offers extensive raster and vector processing capabilities through graphical workflows. While effective for exploratory analysis, desktop GIS tools are not designed for automated large-scale processing across many NetCDF files, nor do they provide an integrated mechanism for consistently retrieving datasets from multiple climate and geospatial repositories. GridFlow differs by offering both a CLI and GUI that expose equivalent configuration options and consistent logging, enabling workflows to be repeated and shared as version-controlled commands.
+In the broader geospatial and hydrological modeling domains, tools such as `Geodata-Harvester` [@Haan2023] jumpstart spatial data extraction to generate ready-made datasets for machine learning models, and `HydroMT` [@Eilander2023] automates the reproducible building of model instances from available data. When evaluating the software landscape, a "build versus contribute" decision was made to develop GridFlow independently. Extending existing domain-specific tools like `HydroMT` or `Geodata-Harvester` to act as generalized bulk downloaders for massive, heterogeneous archives (like CMIP5/6 or ERA5) would have unnecessarily bloated their core missions. GridFlow specifically fills this generalized upstream niche.
 
-Overall, GridFlow contributes a modular and extensible “downloader hub” that integrates acquisition and preprocessing for climate and geospatial datasets under a single interface. Its design supports both global-scale datasets and subset-based workflows, enabling reproducible preparation pipelines for research, education, and operational prototyping while reducing the need for archive-specific scripts and manual portal interactions.
+GridFlow also contrasts with interactive desktop GIS software such as QGIS. While QGIS offers extensive graphical workflows for exploratory analysis, it is not designed for automated, large-scale processing across thousands of NetCDF files, nor does it natively integrate bulk retrieval from multiple climate repositories. GridFlow bridges this gap by offering both a CLI and GUI that expose equivalent configuration options, enabling automated workflows to be repeated and shared as version-controlled commands.
 
+Overall, GridFlow contributes a modular and extensible “downloader hub” that unites acquisition and spatial-temporal preprocessing under a single interface. Its design supports both global-scale datasets and subset-based workflows, establishing reproducible preparation pipelines while significantly reducing the need for archive-specific ad-hoc scripts.
+
+# Research impact statement
+
+The complexity of data acquisition often dictates the scope of climate research. By lowering the technical barrier to accessing high-value datasets like CMIP6, ERA5, and PRISM, GridFlow enables a broader community of researchers—including students, interdisciplinary scientists, and those with limited computational resources—to incorporate state-of-the-art climate data into their work.
+
+Evidence of GridFlow’s near-term significance and utility is demonstrated by its active deployment in applied environmental studies. For instance, GridFlow was utilized to complete an NRCS-CPF project ("Building Understanding and Capacity for the Use of Climate Projections in Conservation Planning and Implementation"), where it facilitated the seamless integration of climate projections into NRCS conservation planning tools to assess climate impacts. Additionally, the software is central to an ongoing Water Resources Center (WRC) project, where it is used to systematically acquire and downscale high-resolution climate projections. This preprocessed data is necessary to drive physical hydrologic models (like WEPP) to simulate runoff, soil erosion, and water quality under historical and future climate scenarios.
+
+Specifically, GridFlow impacts research by:
+1. **Enhancing Reproducibility:** By replacing manual downloads and ad-hoc scripts with version-controlled configuration files (`config.json`) and CLI commands, GridFlow allows complex data preparation workflows to be fully audited and reproduced.
+2. **Standardizing Preprocessing:** Common operations like regridding, unit conversion, and temporal aggregation are performed using standardized, tested implementations, reducing the risk of errors associated with custom post-processing scripts.
+3. **Accelerating Discovery:** Researchers can rapidly prototype analysis on local subsets of data (e.g., a specific watershed or time period) without needing to download and manage entire global archives, significantly reducing the "time-to-analysis."
+
+We anticipate that GridFlow will be particularly valuable in hydrology, ecology, and agricultural modeling, where climate data is a critical input but often not the primary focus of the research. Reflecting its growing utility, we are increasingly being approached by other laboratories at academic institutions to develop and add specific, domain-relevant data modules to the GridFlow ecosystem.
 
 # Roadmap and future development
 
 GridFlow is actively being expanded toward a general-purpose “downloader hub” for climate and geospatial datasets, where new sources can be added as independent modules while preserving a consistent user experience. Planned future releases will prioritize additional datasets, improved cross-platform packaging, and expanded preprocessing support. Figure 4 outlines a tentative development roadmap; timelines are subject to change depending on community feedback, available compute resources, and potential funding or sponsorship.
 
 ![Tentative development roadmap for future GridFlow releases, including planned datasets and processing modules.](gridflow_roadmap.png)
+
+# AI usage disclosure
+
+Generative AI tools (specifically, Gemini v3.0 pro) were employed during the development of GridFlow to assist with code refactoring, generating boilerplate for new download modules, and scaffolding unit tests. AI tools were also used for copy-editing and drafting sections of the documentation and this manuscript. All AI-generated code was thoroughly reviewed, manually tested, and validated against standard climate datasets to ensure correctness and adherence to the project's architecture. The authors reviewed, edited, and validated all AI-assisted text outputs, making all core design and architectural decisions. The human authors bear full responsibility for the accuracy, originality, and validity of the software and this publication.
 
 # Availability
 
