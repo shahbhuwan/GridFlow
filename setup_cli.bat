@@ -15,8 +15,8 @@ python -c "import sys; exit(1) if not ((3,10) <= sys.version_info < (3,13)) else
 
 if %errorlevel% neq 0 (
     echo.
-    echo [CRITICAL ERROR] Python is missing or too old.
-    echo GridFlow requires Python 3.10 or newer.
+    echo [CRITICAL ERROR] Compatible Python not found.
+    echo GridFlow requires Python 3.10, 3.11, or 3.12.
     echo.
     echo Opening Python download page...
     start https://www.python.org/downloads/
