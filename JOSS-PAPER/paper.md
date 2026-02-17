@@ -141,3 +141,5 @@ https://github.com/shahbhuwan/GridFlow
 The authors thank the open-source scientific Python community for foundational libraries that enable GridFlow's functionality, including Xarray, GeoPandas, and the broader NetCDF and geospatial ecosystem. The authors also acknowledge the data providers and maintainers of ESGF, PRISM Climate Group, ECMWF (ERA5), Copernicus DEM, and USGS datasets for making large-scale climate and geospatial resources publicly accessible.
 
 This work was supported by the U.S. Department of Agriculture (USDA) Natural Resources Conservation Service (NRCS) under Cooperative Agreement No. NR243A750008C001.
+
+# References
