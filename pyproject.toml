@@ -10,7 +10,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "gridflow"
 version = "1.0"
-requires-python = ">=3.10,<3.13"
+requires-python = ">=3.10"
 dependencies = [
   "pillow>=9.0.0",
   "requests>=2.28.0",
@@ -31,3 +31,7 @@ dependencies = [
 
 [project.optional-dependencies]
 gui = ["PyQt5>=5.15.0"]
+
+[project.scripts]
+gridflow = "gridflow.cli:main"
+gridflow-gui = "gridflow.gui:main"
