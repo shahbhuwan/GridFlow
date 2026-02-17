@@ -14,7 +14,7 @@ REM --- Detect a compatible Python interpreter ---
 REM Tier 1: Try "python" on PATH and check that it is 3.10 <= version < 3.13
 set "PYTHON_CMD="
 
-python -c "import sys; exit(0 if sys.version_info >= (3, 10) else 1)" >nul 2>&1
+python -c "import sys; exit(0 if sys.version_info >= (3, 11) else 1)" >nul 2>&1
 if %errorlevel% equ 0 (
     set "PYTHON_CMD=python"
     goto :python_found
