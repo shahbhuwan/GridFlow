@@ -1,7 +1,7 @@
 pytest>=7.0.0
 pyinstaller>=6.0.0
 pytest-cov
-pytest-qt
+
 pytest-mock
 build
 twine

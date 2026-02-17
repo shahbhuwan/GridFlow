@@ -11,7 +11,7 @@ echo ======================================================
 echo.
 
 REM --- Detect a compatible Python interpreter ---
-REM Tier 1: Try "python" on PATH and check that it is 3.10 <= version < 3.13
+REM Tier 1: Try "python" on PATH and check that it is version >= 3.11
 set "PYTHON_CMD="
 
 python -c "import sys; exit(0 if sys.version_info >= (3, 11) else 1)" >nul 2>&1
@@ -30,7 +30,7 @@ if %errorlevel% equ 0 (
 REM Tier 3: Neither worked — tell the user what to do
 echo.
 echo [CRITICAL ERROR] Compatible Python not found.
-echo GridFlow CLI requires Python 3.10, 3.11, or 3.12.
+echo GridFlow CLI requires Python 3.11 or newer.
 echo.
 echo Recommended: Install Python 3.11 from https://www.python.org/downloads/
 echo              Make sure to check "Add Python to PATH" during installation.
@@ -61,12 +61,19 @@ if not exist "%VENV_NAME%\" (
     echo Creating virtual environment...
     %PYTHON_CMD% -m venv "%VENV_NAME%"
     if %errorlevel% neq 0 (
-        echo ERROR: Failed to create the virtual environment.
+        echo.
+        echo [ERROR] Failed to create virtual environment.
+        echo Common causes:
+        echo 1. You don't have permission to write to this location.
+        echo 2. A file named '%VENV_NAME%' already exists.
+        echo 3. Anti-virus blocked the script.
+        echo.
         pause
         exit /b 1
     )
 ) else (
-    echo Virtual environment already exists.
+    echo Virtual environment directory already exists.
+    echo Attempting to update/use existing environment...
 )
 
 echo.

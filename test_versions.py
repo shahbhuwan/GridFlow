@@ -5,7 +5,7 @@ import shutil
 from pathlib import Path
 
 # Define versions to look for (standard Windows launcher names or executables on PATH)
-TARGET_VERSIONS = ["3.10", "3.11", "3.12", "3.13", "3.14"]
+TARGET_VERSIONS = ["3.11", "3.12", "3.13", "3.14"]
 
 def find_python_executable(version):
     """Try to find a python executable for the given version."""

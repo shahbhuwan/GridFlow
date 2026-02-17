@@ -61,6 +61,7 @@ In the era of big data, acquiring climate data remains a significant bottleneck 
 
 
 GridFlow is designed for portability. You do not need to be a Python expert to use it.
+> **Note:** GridFlow requires **Python 3.11** or newer (unless using the standalone executable).
 
 ### Option 1: Standalone GUI (No Install Required)
 ✅ **Simplest method**: No Python installation needed.
@@ -70,16 +71,24 @@ GridFlow is designed for portability. You do not need to be a Python expert to u
 
 ---
 
-### Option 2: CLI Wrapper (Windows Batch)
-If you prefer the command line but want to avoid manual Python setup:
+### Option 2: CLI Wrapper (Automated Setup)
 
+**Windows:**
 1. Clone or download this repository
 2. Double-click `setup_cli.bat`
+
+**macOS / Linux:**
+1. Open a terminal in the `GridFlow` directory.
+2. Run the setup script:
+   ```bash
+   chmod +x setup_cli.sh
+   ./setup_cli.sh
+   ```
 
 This will automatically:
 - create a virtual environment  
 - install dependencies  
-- open a ready-to-use terminal for GridFlow commands
+- provide instructions to activate the environment
 
 ---
 
@@ -89,7 +98,8 @@ For developers integrating GridFlow into existing workflows:
 ```bash
 git clone https://github.com/shahbhuwan/GridFlow.git
 cd GridFlow
-pip install -r requirements.txt
+pip install -r requirements_cli.txt
+# Optional: pip install -r requirements_gui.txt
 python setup.py install
 ```
 
@@ -99,8 +109,11 @@ python setup.py install
 
 GridFlow provides **two requirements files**:
 
-### `requirements.txt`
-General/runtime dependencies needed to **run GridFlow**.
+### `requirements_cli.txt`
+Dependencies needed to **run the CLI**.
+
+### `requirements_gui.txt`
+Dependencies needed to **run the GUI**.
 
 ### `requirements_dev.txt`
 Developer/testing dependencies (pytest + tooling), including:
@@ -114,7 +127,7 @@ Developer/testing dependencies (pytest + tooling), including:
 That means `requirements_dev.txt` should include:
 
 ```txt
--r requirements.txt
+-r requirements_cli.txt
 pytest
 pytest-cov
 pytest-qt
@@ -565,7 +578,7 @@ GridFlow relies on the scientific Python ecosystem for NetCDF support, climate d
 
 ### ✅ Runtime dependencies
 
-Runtime dependencies are installed via `requirements.txt` (or automatically when installing the package with `pip install .`).
+Runtime dependencies are installed via `requirements_cli.txt` (or automatically when installing the package with `pip install .`).
 
 **Key runtime libraries include:**
 
@@ -582,7 +595,7 @@ Runtime dependencies are installed via `requirements.txt` (or automatically when
 **Install runtime dependencies:**
 
 ```bash
-pip install -r requirements.txt
+pip install -r requirements_cli.txt
 ```
 
 ---
