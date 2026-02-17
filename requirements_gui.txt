@@ -1,0 +1,2 @@
+-r requirements_cli.txt
+PyQt5>=5.15.0

@@ -21,10 +21,13 @@ dependencies = [
   "shapely>=1.8.0",
   "python-dateutil>=2.8.0",
   "cdsapi>=0.7.4",
-  "PyQt5>=5.15.0",
   "pyproj>=3.0.0",
   "beautifulsoup4>=4.0.0",
   "boto3>=1.26.0",
   "rich>=13.0.0",
+  "tqdm>=4.0.0",
   "pyogrio>=0.6.0"
 ]
+
+[project.optional-dependencies]
+gui = ["PyQt5>=5.15.0"]
