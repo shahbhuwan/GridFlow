@@ -61,7 +61,7 @@ In the era of big data, acquiring climate data remains a significant bottleneck 
 
 
 GridFlow is designed for portability. You do not need to be a Python expert to use it.
-> **Note:** GridFlow requires **Python 3.11** or newer (unless using the standalone executable).
+> **Note:** GridFlow requires **Python 3.11, 3.12, 3.13, or 3.14** (Python 3.15+ is not yet supported).
 
 ### Option 1: Standalone GUI (No Install Required)
 ✅ **Simplest method**: No Python installation needed.
@@ -71,24 +71,16 @@ GridFlow is designed for portability. You do not need to be a Python expert to u
 
 ---
 
-### Option 2: CLI Wrapper (Automated Setup)
+### Option 2: CLI Wrapper (Windows Batch)
+If you prefer the command line but want to avoid manual Python setup:
 
-**Windows:**
 1. Clone or download this repository
 2. Double-click `setup_cli.bat`
-
-**macOS / Linux:**
-1. Open a terminal in the `GridFlow` directory.
-2. Run the setup script:
-   ```bash
-   chmod +x setup_cli.sh
-   ./setup_cli.sh
-   ```
 
 This will automatically:
 - create a virtual environment  
 - install dependencies  
-- provide instructions to activate the environment
+- open a ready-to-use terminal for GridFlow commands
 
 ---
 

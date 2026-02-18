@@ -26,5 +26,5 @@ setup(
     author="Bhuwan Shah",
     license="GNU AGPLv3",
     description="A modular toolset for downloading and processing geospatial data.",
-    python_requires=">=3.11",
+    python_requires=">=3.11,<3.15",
 )

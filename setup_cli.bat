@@ -12,9 +12,12 @@ echo.
 
 REM --- Detect a compatible Python interpreter ---
 REM Tier 1: Try "python" on PATH and check that it is version >= 3.11
+REM Tier 0: Check if PYTHON_CMD is already set (for testing)
+if defined PYTHON_CMD goto :python_found
+
 set "PYTHON_CMD="
 
-python -c "import sys; exit(0 if sys.version_info >= (3, 11) else 1)" >nul 2>&1
+python -c "import sys; exit(0 if (3, 11) <= sys.version_info < (3, 15) else 1)" >nul 2>&1
 if %errorlevel% equ 0 (
     set "PYTHON_CMD=python"
     goto :python_found
@@ -30,12 +33,13 @@ if %errorlevel% equ 0 (
 REM Tier 3: Neither worked — tell the user what to do
 echo.
 echo [CRITICAL ERROR] Compatible Python not found.
-echo GridFlow CLI requires Python 3.11 or newer.
+echo GridFlow CLI requires Python 3.11, 3.12, 3.13, or 3.14.
+echo (Python 3.15+ is not yet supported).
 echo.
 echo Recommended: Install Python 3.11 from https://www.python.org/downloads/
 echo              Make sure to check "Add Python to PATH" during installation.
 echo.
-echo If you already have Python 3.11 installed but it is not on your PATH,
+echo If you already have a compatible Python version installed but it is not on your PATH,
 echo install the Python Launcher for Windows ("py") so this script can find it:
 echo   https://docs.python.org/3/using/windows.html#launcher
 echo.
@@ -61,15 +65,21 @@ if not exist "%VENV_NAME%\" (
     echo Creating virtual environment...
     %PYTHON_CMD% -m venv "%VENV_NAME%"
     if %errorlevel% neq 0 (
-        echo.
-        echo [ERROR] Failed to create virtual environment.
-        echo Common causes:
-        echo 1. You don't have permission to write to this location.
-        echo 2. A file named '%VENV_NAME%' already exists.
-        echo 3. Anti-virus blocked the script.
-        echo.
-        pause
-        exit /b 1
+        if exist "%VENV_NAME%\Scripts\activate.bat" (
+            echo.
+            echo [WARNING] Virtual environment creation returned an error code, but the environment appears to have been created.
+            echo Proceeding with setup...
+        ) else (
+            echo.
+            echo [ERROR] Failed to create virtual environment.
+            echo Common causes:
+            echo 1. You don't have permission to write to this location.
+            echo 2. A file named '%VENV_NAME%' already exists.
+            echo 3. Anti-virus blocked the script.
+            echo.
+            pause
+            exit /b 1
+        )
     )
 ) else (
     echo Virtual environment directory already exists.

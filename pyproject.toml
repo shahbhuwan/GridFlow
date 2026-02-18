@@ -10,7 +10,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "gridflow"
 version = "1.0"
-requires-python = ">=3.11"
+requires-python = ">=3.11,<3.15"
 dependencies = [
   "pillow>=9.0.0",
   "requests>=2.28.0",
