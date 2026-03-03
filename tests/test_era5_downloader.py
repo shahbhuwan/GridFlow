@@ -15,7 +15,9 @@ import pytest
 import boto3
 from botocore.exceptions import ClientError
 
-import gridflow.download.era5_downloader as era5_downloader
+import sys
+import gridflow.download.era5_downloader
+era5_downloader_module = sys.modules['gridflow.download.era5_downloader']
 from gridflow.download.era5_downloader import (
     Downloader, 
     QueryHandler, 
@@ -69,7 +71,7 @@ def downloader(file_manager, mock_stop_event, mock_s3_client):
 def test_missing_dependency_boto3(capsys):
     with patch.dict('sys.modules', {'boto3': None}):
         with pytest.raises(SystemExit) as exc:
-            reload(era5_downloader)
+            reload(era5_downloader_module)
         assert exc.value.code == 1
     captured = capsys.readouterr()
     assert "Missing required library: boto3" in captured.out
@@ -80,9 +82,9 @@ def test_missing_dependency_boto3(capsys):
 
 def test_signal_handler(caplog):
     caplog.set_level(logging.INFO)
-    era5_downloader.stop_event.clear()
+    era5_downloader_module.stop_event.clear()
     signal_handler(None, None)
-    assert era5_downloader.stop_event.is_set()
+    assert era5_downloader_module.stop_event.is_set()
     assert "Stop signal received" in caplog.text
 
 # ############################################################################
