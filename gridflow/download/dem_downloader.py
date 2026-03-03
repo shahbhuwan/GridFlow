@@ -348,34 +348,78 @@ def load_config(config_path: str) -> Dict:
         logging.error(f"Failed to load config file {config_path}: {e}")
         return {}
 
+
 def create_download_session(settings: Dict[str, Any], stop_event: threading.Event) -> None:
     is_gui_mode = settings.get('is_gui_mode', False)
+
+    def _bounds_example() -> str:
+        return "Example: 42.9 41.1 -91.1 -92.9 (N S E W)"
+
+    def _normalize_bounds(bounds: Any) -> Dict[str, float]:
+        # Accept dict or list/tuple [N, S, E, W]
+        if isinstance(bounds, dict):
+            return {
+                "north": float(bounds["north"]),
+                "south": float(bounds["south"]),
+                "east": float(bounds["east"]),
+                "west": float(bounds["west"]),
+            }
+        if isinstance(bounds, (list, tuple)) and len(bounds) == 4:
+            n, s, e, w = bounds
+            return {"north": float(n), "south": float(s), "east": float(e), "west": float(w)}
+        raise ValueError(f"Invalid bounds: expected 4 values: NORTH SOUTH EAST WEST. {_bounds_example()}")
+
+    def _validate_bounds(b: Dict[str, float]) -> None:
+        if b["north"] < b["south"]:
+            raise ValueError(f"Invalid bounds: North must be greater than South. {_bounds_example()}")
+        if b["east"] < b["west"]:
+            raise ValueError(f"Invalid bounds: East must be greater than West. {_bounds_example()}")
+
     try:
         if settings.get('retry_failed_path'):
             files_to_process = load_config(settings['retry_failed_path'])
         else:
-            # 1. Check Bounds
+            # 1) Bounds required (unless demo)
             if not settings.get('bounds') and not settings.get('demo'):
-                logging.error("Bounds (North, South, East, West) are required.")
-                if not is_gui_mode: sys.exit(1)
-                return
+                # Match test expectation text:
+                # "Bounds (North, South, East, West) are required"
+                msg = f"Bounds (North, South, East, West) are required. {_bounds_example()}"
+                if is_gui_mode:
+                    raise ValueError(msg)
+                logging.error(msg)
+                sys.exit(2)
 
             dem_type = settings.get('dem_type', 'COP30')
-            
-            # 2. Query S3
+
+            # 2) Normalize + validate bounds
+            if settings.get('bounds'):
+                try:
+                    settings['bounds'] = _normalize_bounds(settings['bounds'])
+                    _validate_bounds(settings['bounds'])
+                except ValueError as ve:
+                    if is_gui_mode:
+                        raise  # GUI handles display
+                    logging.error(str(ve))
+                    sys.exit(2)
+
+            # 3) Query S3
             query_handler = QueryHandler(stop_event=stop_event)
             potential_files = query_handler.generate_potential_files(settings['bounds'], dem_type)
-            
+
             if not potential_files:
-                logging.error("Could not generate tile keys for the given bounds.")
-                if not is_gui_mode: sys.exit(1)
-                return
+                msg = "Could not generate tile keys for the given bounds. " + _bounds_example()
+                if is_gui_mode:
+                    raise ValueError(msg)
+                logging.error(msg)
+                sys.exit(2)
 
             files_to_process = query_handler.validate_files_on_s3(potential_files, is_gui_mode=is_gui_mode)
 
+        # 4) No files found on S3
         if not files_to_process:
-            logging.info(f"No available tiles found on S3 for {settings.get('dem_type')}.")
-            if not is_gui_mode: sys.exit(0)
+            logging.info("No available tiles found on S3")
+            if not is_gui_mode:
+                sys.exit(0)
             return
 
         file_manager = FileManager(settings['output_dir'], settings['metadata_dir'], "gridflow_dem_")
@@ -391,16 +435,20 @@ def create_download_session(settings: Dict[str, Any], stop_event: threading.Even
         downloader = Downloader(file_manager, stop_event, **settings)
         downloaded, failed = downloader.download_all(files_to_process)
 
-        if stop_event.is_set(): logging.warning("Process was stopped before completion.")
+        if stop_event.is_set():
+            logging.warning("Process was stopped before completion.")
         if failed:
             file_manager.save_metadata(failed, "failed_downloads.json")
             logging.warning(f"{len(failed)} downloads failed. Check 'failed_downloads.json' for details.")
-        
-        logging.info(f"Completed: {downloader.successful_downloads}/{len(files_to_process)} tiles downloaded successfully.")
+
+        logging.info(
+            f"Completed: {downloader.successful_downloads}/{len(files_to_process)} tiles downloaded successfully."
+        )
 
     except Exception as e:
         logging.critical(f"A critical error occurred: {e}", exc_info=True)
         stop_event.set()
+
 
 def add_arguments(parser):
     query_group = parser.add_argument_group('Query Parameters')
@@ -475,10 +523,26 @@ def main(args=None):
         
         if isinstance(settings.get('bounds'), list):
             b = settings['bounds']
+            is_gui = getattr(args, 'is_gui_mode', False)
+
+            # Expect: [NORTH, SOUTH, EAST, WEST]
+            if len(b) != 4:
+                msg = "Invalid bounds: expected 4 values: NORTH SOUTH EAST WEST."
+                if is_gui:
+                    raise ValueError(msg)
+                logging.error(msg)
+                sys.exit(1)
+
             if b[0] <= b[1]:
-                logging.error("Invalid bounds: North must be greater than South.")
-                if not getattr(args, 'is_gui_mode', False): sys.exit(1)
-                return
+                msg = (
+                    "Invalid bounds: North must be greater than South. "
+                    "Example: 42.9 41.1 -91.1 -92.9 (N S E W)"
+                )
+                if is_gui:
+                    raise ValueError(msg)
+                logging.error(msg)
+                sys.exit(1)
+
             settings['bounds'] = {'north': b[0], 'south': b[1], 'east': b[2], 'west': b[3]}
 
     create_download_session(settings, active_stop_event)

@@ -17,8 +17,12 @@ from .prism_downloader import add_arguments as prism_add_arguments, main as pris
 from .dem_downloader import add_arguments as dem_add_arguments, main as dem_main
 from .cmip5_downloader import add_arguments as cmip5_add_arguments, main as cmip5_main
 from .cmip6_downloader import add_arguments as cmip6_add_arguments, main as cmip6_main
+from .nisar_downloader import add_arguments as nisar_add_arguments, main as nisar_main
+from .era5_downloader import add_arguments as era5_add_arguments, main as era5_main
 
 prism_downloader = type('PrismDownloader', (), {'add_arguments': prism_add_arguments, 'main': prism_main})
 dem_downloader = type('DemDownloader', (), {'add_arguments': dem_add_arguments, 'main': dem_main})
 cmip5_downloader = type('Cmip5Downloader', (), {'add_arguments': cmip5_add_arguments, 'main': cmip5_main})
 cmip6_downloader = type('Cmip6Downloader', (), {'add_arguments': cmip6_add_arguments, 'main': cmip6_main})
+nisar_downloader = type('NisarDownloader', (), {'add_arguments': nisar_add_arguments, 'main': nisar_main})
+era5_downloader = type('Era5Downloader', (), {'add_arguments': era5_add_arguments, 'main': era5_main})

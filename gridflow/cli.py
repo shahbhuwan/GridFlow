@@ -22,7 +22,8 @@ from gridflow.download import (
     dem_downloader,
     cmip5_downloader,
     cmip6_downloader,
-    era5_downloader
+    era5_downloader,
+    nisar_downloader
 )
 from gridflow.processing import (
     crop_netcdf,
@@ -46,8 +47,8 @@ def print_intro():
 Welcome to GridFlow v{}! Copyright (c) 2025 Bhuwan Shah
 GridFlow is a modular Python toolkit for downloading and processing key climate and geospatial
 datasets. It provides both a powerful command-line interface and a user-friendly GUI to fetch 
-data from PRISM, DEM, CMIP5, CMIP6, and ERA5, and perform post-processing tasks like cropping, 
-clipping, and temporal aggregation.
+data from PRISM, DEM, CMIP5, CMIP6, ERA5, and NISAR, and perform post-processing tasks like  
+cropping, clipping, unit conversion, temporal aggregation, and catalog generation.
 ==============================================================================================
 """.format(__version__)
     print(banner)
@@ -78,6 +79,7 @@ Downloading Tools:
   cmip6               Download CMIP6 climate model data
   era5                Download ERA5-Land climate data
   dem                 Download Digital Elevation Models via OpenTopography
+  nisar               Download NISAR satellite data via ASF DAAC
 
 Processing Tools:
   crop                Crop NetCDF files to a spatial bounding box
@@ -90,6 +92,7 @@ Examples:
   gridflow cmip6 --demo             # Download sample CMIP6 data
   gridflow cmip5 --demo             # Download sample CMIP5 data
   gridflow prism --demo             # Download sample PRISM data
+  gridflow nisar --demo             # Download sample NISAR data
   gridflow crop --demo              # Crop NetCDF files to sample bounds
     
 """
@@ -149,6 +152,16 @@ Examples:
         parents=[parent_parser], formatter_class=WideHelpFormatter
     )
     era5_downloader.add_arguments(era5_parser)
+
+    # NISAR Downloader
+    nisar_parser = subparsers.add_parser(
+        "nisar",
+        help="Download NISAR satellite data",
+        description="Download NISAR data from ASF DAAC.",
+        epilog="Example: gridflow nisar --demo\nDownloads sample NISAR data.",
+        parents=[parent_parser], formatter_class=WideHelpFormatter
+    )
+    nisar_downloader.add_arguments(nisar_parser)
 
     # Crop NetCDF
     crop_parser = subparsers.add_parser(
@@ -214,6 +227,7 @@ def main():
         "cmip5": cmip5_downloader.main,
         "cmip6": cmip6_downloader.main,
         "era5": era5_downloader.main,
+        "nisar": nisar_downloader.main,
         "crop": crop_netcdf.main,
         "clip": clip_netcdf.main,
         "convert": unit_convert.main,

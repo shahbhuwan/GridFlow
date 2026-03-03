@@ -32,6 +32,7 @@ from gridflow.download.dem_downloader import main as dem_main
 from gridflow.download.cmip5_downloader import main as cmip5_main
 from gridflow.download.cmip6_downloader import main as cmip6_main
 from gridflow.download.era5_downloader import main as era5_main, ERA5_VARIABLES, AOI_BOUNDS
+from gridflow.download.nisar_downloader import main as nisar_main
 from gridflow.processing.crop_netcdf import main as crop_main
 from gridflow.processing.clip_netcdf import main as clip_main
 from gridflow.processing.unit_convert import main as unit_convert_main
@@ -591,7 +592,7 @@ class GridFlowGUI(QMainWindow):
         ds_h.setSpacing(8)
 
         self.src_combo = QComboBox()
-        self.src_combo.addItems(["CMIP6", "CMIP5", "ERA5", "PRISM", "DEM"])
+        self.src_combo.addItems(["CMIP6", "CMIP5", "ERA5", "PRISM", "DEM", "NISAR"])
         self.src_combo.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Fixed)
 
         proc_lbl = mk_label("Process:")
@@ -806,7 +807,7 @@ class GridFlowGUI(QMainWindow):
 
         # Validate process compatibility
         valid_processes = ["Download", "Crop", "Clip", "Convert", "Aggregate", "Catalog"]
-        if src in ["PRISM", "DEM", "ERA5"]:
+        if src in ["PRISM", "DEM", "ERA5", "NISAR"]:
             valid_processes = ["Download"]
 
         self.proc_combo.blockSignals(True)
@@ -907,6 +908,13 @@ class GridFlowGUI(QMainWindow):
                 self.arg_widgets["dem_type"].setCurrentText("COP30")
                 self.arg_widgets["output_dir"].setText("./downloads_dem")
                 self.arg_widgets["metadata_dir"].setText("./metadata_dem")
+                self.arg_widgets["log_dir"].setText("./gridflow_logs")
+
+            elif src_now == "NISAR":
+                self.arg_widgets["bounds"].setText("42.0 41.0 -91.0 -92.0")
+                self.arg_widgets["start_date"].setText("2024-01-01")
+                self.arg_widgets["output_dir"].setText("./downloads_nisar")
+                self.arg_widgets["metadata_dir"].setText("./metadata_nisar")
                 self.arg_widgets["log_dir"].setText("./gridflow_logs")
 
             elif src_now == "ERA5":
@@ -1132,6 +1140,22 @@ class GridFlowGUI(QMainWindow):
                 demo_ck = add_chk("Demo", is_first_run(), "Fill the form with demo defaults.", indent=indent_amount)
                 demo_ck.toggled.connect(lambda on: apply_demo_defaults_for_current_form() if on else None)
 
+            elif src == "NISAR":
+                add_line("Bounds", "42.0 41.0 -91.0 -92.0", "Enter bounding box as: NORTH SOUTH EAST WEST (space-separated).", indent=indent_amount)
+                add_line("Start Date", "", "Start date (YYYY-MM-DD).", indent=indent_amount)
+                add_line("End Date", "", "End date (YYYY-MM-DD).", indent=indent_amount)
+                add_combo("Flight Direction", ["", "ASCENDING", "DESCENDING"], "", "Orbit direction.", indent=indent_amount)
+                add_file("Output Dir", "./downloads_nisar", "Directory for downloaded NISAR files.", dir_=True, indent=indent_amount, required=True)
+                add_file("Metadata Dir", "./metadata_nisar", "Directory for NISAR metadata.", dir_=True, indent=indent_amount, required=True)
+                add_file("Log Dir", "./gridflow_logs", "Directory for log files.", dir_=True, indent=indent_amount, required=True)
+                
+                if skill_level == "Advanced":
+                    add_line("Max Downloads", "", "Maximum number of files to download.", indent=indent_amount)
+                    add_chk("Dry Run", False, "Find files but do not download.", indent=indent_amount)
+                    
+                demo_ck = add_chk("Demo", is_first_run(), "Fill the form with demo defaults.", indent=indent_amount)
+                demo_ck.toggled.connect(lambda on: apply_demo_defaults_for_current_form() if on else None)
+
         elif process == "Crop":
             add_file("Input Dir", "./downloads_cmip6", "Directory containing NetCDF files to crop.", dir_=True, indent=indent_amount, required=True)
             add_file("Output Dir", "./cropped_cmip6", "Directory to save cropped NetCDF files.", dir_=True, indent=indent_amount, required=True)
@@ -1318,6 +1342,22 @@ class GridFlowGUI(QMainWindow):
                         self.log_text.append("❗ Invalid Bounds format. Use: NORTH SOUTH EAST WEST (e.g., 43.5 40.3 -91.1 -92.9)")
                         return
 
+            elif src == "NISAR":
+                required = ["output_dir", "metadata_dir", "log_dir"]
+                if not args_dict.get("demo"):
+                    for field in required:
+                        if not args_dict.get(field):
+                            self.log_text.append(f"❗ {field.replace('_', ' ').title()} is required for NISAR Download")
+                            return
+                if args_dict.get("bounds"):
+                    try:
+                        bounds = [float(x) for x in args_dict["bounds"].replace(',', ' ').split()]
+                        if len(bounds) != 4: raise ValueError
+                        args_dict["bounds"] = bounds
+                    except ValueError:
+                        self.log_text.append("❗ Invalid Bounds format. Use: NORTH SOUTH EAST WEST")
+                        return
+
             # Warn about missing authentication for CMIP5/CMIP6
             if src in ["CMIP5", "CMIP6"] and not args_dict.get("demo") and not any([args_dict.get("id"), args_dict.get("password"), args_dict.get("openid")]):
                 resp = QMessageBox.warning(
@@ -1456,6 +1496,7 @@ class GridFlowGUI(QMainWindow):
             ("CMIP6", "Download"): cmip6_main,
             ("CMIP5", "Download"): cmip5_main,
             ("ERA5", "Download"): era5_main,
+            ("NISAR", "Download"): nisar_main,
             ("PRISM", "Download"): prism_main,
             ("DEM", "Download"): dem_main,
             ("*", "Crop"): crop_main,
